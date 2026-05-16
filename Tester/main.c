@@ -15,8 +15,10 @@
 #include <sys/wait.h>
 #endif
 
+#include <ctype.h>
 #include <Core/gb.h>
 #include <Core/random.h>
+#include <Core/symbol_hash.h>
 
 static bool running = false;
 static char *filename;
@@ -33,6 +35,224 @@ GB_gameboy_t gb;
 
 static unsigned int frames = 0;
 static bool use_tga = false;
+
+/* kwigbo-org fork extensions: state-trace harness ----------------------- */
+#define WATCH_MAX 32
+#define WATCH_LABEL_MAX 64
+
+typedef struct {
+    char     label[WATCH_LABEL_MAX];
+    uint16_t addr;
+} watch_t;
+
+typedef struct {
+    unsigned frame;
+    uint8_t  buttons;  /* bitmask: bit k set ⇒ event touches GB_KEY_k */
+    bool     press;
+} script_event_t;
+
+static const char    *sym_filename;
+static const char    *watch_arg;
+static const char    *script_filename;
+static const char    *trace_filename;
+static FILE          *trace_file;
+static watch_t        watches[WATCH_MAX];
+static unsigned       n_watches;
+static script_event_t *script_events;
+static unsigned       n_script_events;
+static unsigned       next_script_event;
+
+static const char *button_names[GB_KEY_MAX] = {
+    [GB_KEY_RIGHT]  = "RIGHT",
+    [GB_KEY_LEFT]   = "LEFT",
+    [GB_KEY_UP]     = "UP",
+    [GB_KEY_DOWN]   = "DOWN",
+    [GB_KEY_A]      = "A",
+    [GB_KEY_B]      = "B",
+    [GB_KEY_SELECT] = "SELECT",
+    [GB_KEY_START]  = "START",
+};
+
+static int parse_button_token(const char *s, size_t len)
+{
+    for (int k = 0; k < GB_KEY_MAX; k++) {
+        if (strlen(button_names[k]) == len && strncasecmp(s, button_names[k], len) == 0) {
+            return k;
+        }
+    }
+    return -1;
+}
+
+static bool parse_button_mask(const char *s, uint8_t *out)
+{
+    uint8_t mask = 0;
+    while (*s) {
+        while (*s == ' ' || *s == '\t') s++;
+        const char *plus = strchr(s, '+');
+        size_t len = plus ? (size_t)(plus - s) : strlen(s);
+        while (len && (s[len - 1] == ' ' || s[len - 1] == '\t')) len--;
+        if (len == 0) return false;
+        int key = parse_button_token(s, len);
+        if (key < 0) return false;
+        mask |= (uint8_t)(1u << key);
+        if (!plus) break;
+        s = plus + 1;
+    }
+    *out = mask;
+    return true;
+}
+
+static bool load_script_file(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        fprintf(stderr, "Failed to open script file '%s'\n", path);
+        return false;
+    }
+    char line[256];
+    unsigned cap = 64;
+    script_events = malloc(cap * sizeof(*script_events));
+    if (!script_events) { fclose(f); return false; }
+    n_script_events = 0;
+    unsigned lineno = 0;
+    unsigned last_frame = 0;
+    while (fgets(line, sizeof(line), f)) {
+        lineno++;
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '\0' || *p == '\n' || *p == '#') continue;
+
+        unsigned frame;
+        char action[16];
+        char buttons[64];
+        int matched = sscanf(p, "%u %15s %63s", &frame, action, buttons);
+        if (matched != 3) {
+            fprintf(stderr, "script '%s' line %u: expected '<frame> press|release <buttons>'\n", path, lineno);
+            fclose(f); return false;
+        }
+        if (frame < last_frame) {
+            fprintf(stderr, "script '%s' line %u: frame %u out of order (previous was %u)\n",
+                    path, lineno, frame, last_frame);
+            fclose(f); return false;
+        }
+        last_frame = frame;
+
+        bool press;
+        if (strcasecmp(action, "press") == 0) press = true;
+        else if (strcasecmp(action, "release") == 0) press = false;
+        else {
+            fprintf(stderr, "script '%s' line %u: unknown action '%s' (expected press/release)\n",
+                    path, lineno, action);
+            fclose(f); return false;
+        }
+
+        uint8_t mask;
+        if (!parse_button_mask(buttons, &mask)) {
+            fprintf(stderr, "script '%s' line %u: bad button list '%s'\n", path, lineno, buttons);
+            fclose(f); return false;
+        }
+
+        if (n_script_events >= cap) {
+            cap *= 2;
+            script_event_t *grown = realloc(script_events, cap * sizeof(*script_events));
+            if (!grown) { fclose(f); return false; }
+            script_events = grown;
+        }
+        script_events[n_script_events++] = (script_event_t){frame, mask, press};
+    }
+    fclose(f);
+    return true;
+}
+
+/* Resolve a single token to a 16-bit address. Hex like "0xC100" or a symbol
+   name resolved via the debugger's reversed symbol map. Returns true on success. */
+static bool resolve_watch_token(const char *tok, watch_t *out)
+{
+    size_t len = strlen(tok);
+    if (len == 0 || len >= WATCH_LABEL_MAX) return false;
+
+    memcpy(out->label, tok, len + 1);
+
+    if (len > 2 && (tok[0] == '0') && (tok[1] == 'x' || tok[1] == 'X')) {
+        char *end;
+        unsigned long v = strtoul(tok + 2, &end, 16);
+        if (*end != '\0' || v > 0xFFFF) return false;
+        out->addr = (uint16_t)v;
+        return true;
+    }
+
+#ifndef GB_DISABLE_DEBUGGER
+    const GB_symbol_t *sym = GB_reversed_map_find_symbol(&gb.reversed_symbol_map, tok);
+    if (sym) {
+        out->addr = sym->addr;
+        return true;
+    }
+#endif
+    fprintf(stderr, "watch: unknown symbol '%s' (no --sym file, or symbol not in map)\n", tok);
+    return false;
+}
+
+static bool resolve_watches(const char *arg)
+{
+    n_watches = 0;
+    const char *s = arg;
+    while (*s) {
+        const char *comma = strchr(s, ',');
+        size_t len = comma ? (size_t)(comma - s) : strlen(s);
+        while (len && (s[len - 1] == ' ' || s[len - 1] == '\t')) len--;
+        while (len && (*s == ' ' || *s == '\t')) { s++; len--; }
+        if (len == 0) goto next;
+        if (len >= WATCH_LABEL_MAX) {
+            fprintf(stderr, "watch: token too long\n");
+            return false;
+        }
+        if (n_watches >= WATCH_MAX) {
+            fprintf(stderr, "watch: too many entries (max %d)\n", WATCH_MAX);
+            return false;
+        }
+        char tok[WATCH_LABEL_MAX];
+        memcpy(tok, s, len);
+        tok[len] = '\0';
+        if (!resolve_watch_token(tok, &watches[n_watches])) return false;
+        n_watches++;
+    next:
+        if (!comma) break;
+        s = comma + 1;
+    }
+    return true;
+}
+
+static void apply_scripted_input(GB_gameboy_t *_gb)
+{
+    while (next_script_event < n_script_events && script_events[next_script_event].frame == frames) {
+        const script_event_t *ev = &script_events[next_script_event++];
+        for (int k = 0; k < GB_KEY_MAX; k++) {
+            if (ev->buttons & (1u << k)) {
+                GB_set_key_state(_gb, (GB_key_t)k, ev->press);
+            }
+        }
+    }
+}
+
+static void dump_trace_row(GB_gameboy_t *_gb)
+{
+    if (!trace_file) return;
+    fprintf(trace_file, "%u\t", frames);
+    bool first = true;
+    for (int k = 0; k < GB_KEY_MAX; k++) {
+        if (_gb->keys[0][k]) {
+            if (!first) fputc('+', trace_file);
+            fputs(button_names[k], trace_file);
+            first = false;
+        }
+    }
+    if (first) fputc('.', trace_file);
+    for (unsigned w = 0; w < n_watches; w++) {
+        fprintf(trace_file, "\t0x%02X", GB_safe_read_memory(_gb, watches[w].addr));
+    }
+    fputc('\n', trace_file);
+}
+/* end fork extensions ---------------------------------------------------- */
 static uint8_t bmp_header[] = {
     0x42, 0x4D, 0x48, 0x68, 0x01, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x46, 0x00, 0x00, 0x00, 0x38, 0x00,
@@ -60,6 +280,10 @@ static char *async_input_callback(GB_gameboy_t *gb)
 
 static void handle_buttons(GB_gameboy_t *gb)
 {
+    if (script_filename) {
+        apply_scripted_input(gb);
+        return;
+    }
     if (!gb->cgb_double_speed && unsafe_speed_switch) {
         return;
     }
@@ -295,6 +519,7 @@ int main(int argc, char **argv)
 #ifndef _WIN32
                         " [--jobs number of tests to run simultaneously]"
 #endif
+                        " [--sym path to .sym] [--watch sym_or_addr[,...]] [--script path] [--trace-out path]"
                         " rom ...\n", argv[0]);
         exit(1);
     }
@@ -362,7 +587,30 @@ int main(int argc, char **argv)
             sav = true;
             continue;
         }
-        
+
+        if (strcmp(argv[i], "--sym") == 0 && i != argc - 1) {
+            sym_filename = argv[++i];
+            fprintf(stderr, "Symbol file: %s\n", sym_filename);
+            continue;
+        }
+
+        if (strcmp(argv[i], "--watch") == 0 && i != argc - 1) {
+            watch_arg = argv[++i];
+            continue;
+        }
+
+        if (strcmp(argv[i], "--script") == 0 && i != argc - 1) {
+            script_filename = argv[++i];
+            fprintf(stderr, "Input script: %s\n", script_filename);
+            continue;
+        }
+
+        if (strcmp(argv[i], "--trace-out") == 0 && i != argc - 1) {
+            trace_filename = argv[++i];
+            fprintf(stderr, "Trace output: %s\n", trace_filename);
+            continue;
+        }
+
 #ifndef _WIN32
         if (strcmp(argv[i], "--jobs") == 0 && i != argc - 1) {
             max_forks = atoi(argv[++i]);
@@ -386,6 +634,31 @@ int main(int argc, char **argv)
 #endif
         filename = argv[i];
         size_t path_length = strlen(filename);
+
+        /* kwigbo-org fork: one-shot init for trace harness. Runs once per
+           process (so each --jobs child reloads the script independently). */
+        static bool harness_init_done = false;
+        if (!harness_init_done) {
+            harness_init_done = true;
+#ifndef _WIN32
+            if (trace_filename && max_forks > 1) {
+                fprintf(stderr, "--trace-out is incompatible with --jobs > 1\n");
+                exit(1);
+            }
+#endif
+            if (script_filename && push_start_a) {
+                fprintf(stderr, "--script overrides --start; --start ignored\n");
+                push_start_a = false;
+            }
+            if (watch_arg && !sym_filename) {
+                /* Numeric tokens still work; only named symbols need --sym. */
+                fprintf(stderr, "--watch without --sym: only hex addresses resolvable\n");
+            }
+            if (script_filename && !load_script_file(script_filename)) {
+                exit(1);
+            }
+        }
+        next_script_event = 0;
 
         char bitmap_path[path_length + 5]; /* At the worst case, size is strlen(path) + 4 bytes for .bmp + NULL */
         replace_extension(filename, path_length, bitmap_path, use_tga? ".tga" : ".bmp");
@@ -496,6 +769,29 @@ int main(int argc, char **argv)
                               strcmp((const char *)(gb.rom + 0x134), "POKEMONGOLD 2") == 0; // Pokemon Adventure
 
         
+        /* kwigbo-org fork: per-ROM trace harness setup. Symbols and trace file
+           depend on the live GB state, so they're (re)bound after each load. */
+        if (sym_filename) {
+            GB_debugger_load_symbol_file(&gb, sym_filename);
+        }
+        n_watches = 0;
+        if (watch_arg && !resolve_watches(watch_arg)) {
+            exit(1);
+        }
+        if (trace_filename) {
+            trace_file = fopen(trace_filename, "w");
+            if (!trace_file) {
+                fprintf(stderr, "Failed to open trace file '%s'\n", trace_filename);
+                exit(1);
+            }
+            fprintf(trace_file, "# rom: %s\n", filename);
+            fputs("frame\tbuttons", trace_file);
+            for (unsigned w = 0; w < n_watches; w++) {
+                fprintf(trace_file, "\t%s", watches[w].label);
+            }
+            fputc('\n', trace_file);
+        }
+
         /* Run emulation */
         running = true;
         gb.turbo = gb.turbo_dont_skip = gb.disable_rendering = true;
@@ -504,6 +800,7 @@ int main(int argc, char **argv)
         while (running) {
             cycles += GB_run(&gb);
             if (cycles >= 139810) { /* Approximately 1/60 a second. Intentionally not the actual length of a frame. */
+                dump_trace_row(&gb);
                 handle_buttons(&gb);
                 cycles -= 139810;
                 frames++;
@@ -520,7 +817,12 @@ int main(int argc, char **argv)
             fclose(log_file);
             log_file = NULL;
         }
-        
+
+        if (trace_file) {
+            fclose(trace_file);
+            trace_file = NULL;
+        }
+
         GB_free(&gb);
 #ifndef _WIN32
         if (max_forks > 1) {
