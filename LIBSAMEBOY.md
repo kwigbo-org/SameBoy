@@ -63,15 +63,18 @@ Exported symbol count in `libsameboy.so`: **182**. Verified via `nm -D --defined
 
 ### Frame loop and input
 
-- `GB_run_frame(gb)` → `uint64_t` cycles consumed in the frame
-- `GB_run(gb)` → unsigned; runs until the next vblank
+- `GB_run_frame(gb)` → `uint64_t` **nanoseconds** elapsed since the previous frame (per the comment at [Core/gb.h:913](Core/gb.h)) — *not* cycles. If a cycle count is needed, derive from `GB_get_clock_rate(gb)` or accumulate `GB_run(gb)` return values.
+- `GB_run(gb)` → unsigned; runs one CPU "event" worth of work and returns 8MHz ticks consumed (per the comment at [Core/gb.h:911](Core/gb.h)). `GB_run_frame` is the helper that loops `GB_run` until vblank.
 - `GB_set_key_state(gb, key, pressed)`
 - `GB_set_key_state_for_player(gb, key, player, pressed)` — multi-player link cable
 - `GB_set_vblank_callback(gb, callback)` — fires per frame
 
 ### State inspection (the Phase 3 capabilities)
 
-- **`GB_get_registers(gb)`** → `GB_registers_t *` with `A/F/BC/DE/HL/SP/PC`. Outside any `GB_INTERNAL` block at [Core/gb.h](Core/gb.h) line 934.
+- **`GB_get_registers(gb)`** → `GB_registers_t *`. Outside any `GB_INTERNAL` block at [Core/gb.h](Core/gb.h) line 934. The struct is a **union** with three views ([Core/gb.h](Core/gb.h) lines 315–328):
+  - `uint16_t registers[]` — indexed access
+  - 16-bit pairs: `af`, `bc`, `de`, `hl`, `sp`, `pc`
+  - 8-bit halves via `GB_REGISTER_ORDER`: `a`, `f`, `b`, `c`, `d`, `e`, `h`, `l` (the macro selects the endianness-correct ordering).
 - **`GB_get_direct_access(gb, access, &size, &bank)`** → raw `void *` pointer to a region. Enum values from [Core/gb.h](Core/gb.h) lines 917–928:
 
   | Enum | Region |
@@ -126,13 +129,13 @@ Exported symbol count in `libsameboy.so`: **182**. Verified via `nm -D --defined
 
 | Capability roadmap claims | Reachable? | Mechanism |
 |---|---|---|
-| CPU register watches (A/BC/DE/HL/SP/PC) | ✅ | `GB_get_registers(gb)` |
+| CPU register watches (16-bit `af/bc/de/hl/sp/pc` and 8-bit halves) | ✅ | `GB_get_registers(gb)` |
 | Per-frame screen hash | ✅ | hash bytes from `GB_get_pixels_output(gb)` |
 | Sub-frame / instruction stepping | ⚠️ Indirect | `GB_set_execution_callback` for per-instruction observation; no public single-step C call. Heavy if used continuously. |
 | **OAM/VRAM/palette dumps** (not previously credited) | ✅ Bonus | `GB_get_direct_access(gb, ACCESS_*, &size, NULL)` — one call per region |
-| **Per-frame cycle count** (Phase 1.4 in CLI) | ✅ Free | `GB_run_frame(gb)` returns it |
+| **Per-frame cycle count** (Phase 1.4 in CLI) | ⚠️ Indirect | Accumulate `GB_run(gb)` returns across the frame (8MHz ticks), or derive from `GB_run_frame(gb)`'s nanoseconds × `GB_get_clock_rate(gb)` ÷ 1e9. Tester Phase 1.4 uses the internal cycle counter directly for the CLI path. |
 
-The bonus capabilities — direct region pointers and cycles-from-`GB_run_frame` — mean the libsameboy migration target is materially richer than the original roadmap claimed. Phase 1.2 (`--dump-range`) and Phase 1.4 (`--cycles`) are still required for CLI consumers (Tester), but a future `libsameboy_harness.py` gets them for free.
+The bonus capability — direct region pointers via `GB_get_direct_access` — means the libsameboy migration target is richer than the original roadmap claimed. Phase 1.2 (`--dump-range`) is still required for CLI consumers (Tester), but a future `libsameboy_harness.py` gets region dumps for free. Phase 1.4 (`--cycles`) remains useful in both paths since `GB_run_frame`'s return value is nanoseconds, not cycles — the CLI implementation uses the internal cycle field directly, and the libsameboy path either accumulates `GB_run` returns or derives cycles from the nanosecond × clock-rate combo.
 
 ---
 

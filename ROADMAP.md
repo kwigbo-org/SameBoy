@@ -108,7 +108,7 @@ Substrate verified 2026-05-17 — see [LIBSAMEBOY.md](LIBSAMEBOY.md) for the aud
 
 ### Capabilities only this phase unlocks
 
-- **CPU register watches** (A/F/BC/DE/HL/SP/PC) — via `GB_get_registers`. Verified reachable; see [LIBSAMEBOY.md](LIBSAMEBOY.md).
+- **CPU register watches** — via `GB_get_registers` (returns a union with 16-bit pairs `af/bc/de/hl/sp/pc` and 8-bit halves `a/f/b/c/d/e/h/l`). Verified reachable; see [LIBSAMEBOY.md](LIBSAMEBOY.md).
 - **Per-frame screen hash** — hash bytes from `GB_get_pixels_output`. Cheap golden screenshot testing without storing BMPs.
 - **Region pointer access** (OAM / VRAM / HRAM / WRAM / palette regs) — via `GB_get_direct_access`. **Bonus capability** discovered in the substrate audit and not in the original roadmap; replaces Phase 1.2 `--dump-range` for libsameboy consumers (CLI consumers still need 1.2).
 - **Sub-frame / instruction-level stepping** — via `GB_set_execution_callback`; heavy if used continuously.
