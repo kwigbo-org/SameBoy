@@ -102,13 +102,16 @@ Same mechanism captures any of these; the user picks the watch list per bug clas
 
 ## Phase 3 — libsameboy migration (gated, additive)
 
-A future `libsameboy_harness.py` (ctypes/cffi against the Makefile's `lib` target, which emits `libsameboy.{so,dylib,dll,a}` plus cppp-cleaned public headers in [build/include/](build/include/)). **Additive, not replacement** — [Tester/main.c](Tester/main.c) remains the shell-friendly entry for CI smoke and standalone use.
+A future `libsameboy_harness.py` using Python `ctypes` against the Makefile's `lib` target, which emits `libsameboy.{so,dylib,dll,a}` plus cppp-cleaned public headers in [build/include/](build/include/). **Additive, not replacement** — [Tester/main.c](Tester/main.c) remains the shell-friendly entry for CI smoke and standalone use.
+
+Substrate verified 2026-05-17 — see [LIBSAMEBOY.md](LIBSAMEBOY.md) for the audited public API surface, the `cppp` build prereq (with its silent-failure footgun), and the `ctypes` binding rationale.
 
 ### Capabilities only this phase unlocks
 
-- **CPU register watches** (A/BC/DE/HL/SP/PC) — unreachable from CLI flags without an unbounded explosion of state-dumping syntax. Naturally Python attribute access.
-- **Per-frame screen hash** (`xxh64(bitmap)`) — visual regressions become a single hex-column diff. Cheap golden screenshot testing without storing BMPs.
-- **Sub-frame / instruction-level stepping** when a bug needs it.
+- **CPU register watches** (A/F/BC/DE/HL/SP/PC) — via `GB_get_registers`. Verified reachable; see [LIBSAMEBOY.md](LIBSAMEBOY.md).
+- **Per-frame screen hash** — hash bytes from `GB_get_pixels_output`. Cheap golden screenshot testing without storing BMPs.
+- **Region pointer access** (OAM / VRAM / HRAM / WRAM / palette regs) — via `GB_get_direct_access`. **Bonus capability** discovered in the substrate audit and not in the original roadmap; replaces Phase 1.2 `--dump-range` for libsameboy consumers (CLI consumers still need 1.2).
+- **Sub-frame / instruction-level stepping** — via `GB_set_execution_callback`; heavy if used continuously.
 
 ### Migration trigger
 
