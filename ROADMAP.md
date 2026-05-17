@@ -10,7 +10,7 @@ The end state is testing infrastructure that catches three classes of regression
 
 | Regression class | Today | After roadmap |
 |---|---|---|
-| **Game-logic bugs** — wrong state at frame N for a given input | Partially testable (1-byte memory watches only) | Multi-byte typed watches, region dumps, CPU registers |
+| **Game-logic bugs** — wrong state at frame N for a given input | Partially testable (1-byte memory watches only) | Multi-byte typed watches, region dumps; CPU registers *(Phase 3, gated)* |
 | **Visual bugs** — wrong pixels at frame N | Not testable headlessly | Region dumps for OAM/VRAM/palette; screen-hash goldens via libsameboy |
 | **Performance regressions** — code-path cycle cost crept up | Invisible until visible lag | Per-frame T-cycle column pinned in goldens |
 | **Bug repro flow** — "I saw it once in SDL, can't pin it" | Manual reconstruction of inputs | Live record/stop → replayable `--script` |
@@ -21,7 +21,7 @@ Phase 1 is foundation that every other phase consumes. Phases 2–4 are largely 
 
 ## Phase 1 — Tester CLI extensions
 
-Context: [Tester/main.c](Tester/main.c) carries this fork's `--sym` / `--watch` / `--script` / `--trace-out` extensions (commit 265d676), used by the sibling `kwigbo-gb-sdk` Python harness for headless DMG unit testing. Each item below is a small, focused change reused by Phase 2 (interactive capture) and Phase 4 (differential testing) without modification.
+Context: [Tester/main.c](Tester/main.c) carries this fork's `--sym` / `--watch` / `--script` / `--trace-out` extensions (commit 265d676), used by the sibling `kwigbo-gb-sdk` Python harness for headless DMG unit testing. Items 1.1 and 1.2 are reused by Phase 2 (interactive capture) and Phase 4 (differential testing) without modification; 1.3–1.5 are Tester-only.
 
 After landing these, **stop extending Tester** for capabilities the public library already covers — that work goes to Phase 3 (libsameboy binding).
 
@@ -35,7 +35,7 @@ Side-files (`dump_<frame>.bin`) alongside the trace. Replaces the would-be-160-w
 
 ### 1.3 `--stop-at <symbol>` + `--max-frames` — symbol-conditional halt
 
-Complements existing `--length`. See "Why `--stop-at` lives in Tester" in Phase 3 for the verified-against-source rationale.
+Complements existing `--length`. See "Why `--stop-at` lives in Tester regardless" in Phase 3 for the verified-against-source rationale.
 
 ### 1.4 `--cycles` — per-frame T-cycle count exposure
 
@@ -47,7 +47,7 @@ Adds a `cycles` column to the trace TSV: the T-cycle count for each emulated fra
 
 ### 1.5 `--exit-on <expr>` + structured exit codes
 
-Today the Tester detects stack overflow and deadlock ([Tester/main.c:354-362](Tester/main.c#L354-L362)) but only logs to stderr text — the SDK harness can't distinguish "test passed", "predicate failed", and "ROM crashed" without string-parsing stderr.
+Today the Tester detects stack overflow and deadlock (in its `vblank` callback in [Tester/main.c](Tester/main.c)) but only logs to stderr text — the SDK harness can't distinguish "test passed", "predicate failed", and "ROM crashed" without string-parsing stderr.
 
 **Proposal**: distinct exit codes — `0` normal, `10` stack overflow, `11` deadlock, `12` max-frames-without-stop-at, `13` `--exit-on` triggered. Optional `--exit-on <expr>` evaluates a debugger expression each frame (via existing `GB_debugger_evaluate`) and exits 13 when true. Pushes simple invariant checks below the harness boundary.
 
@@ -67,10 +67,10 @@ The trace + input log compose into deterministic replay: capture an interactive 
 
 Public Core hooks already cover this:
 
-- `GB_set_vblank_callback` ([Core/gb.h:717](Core/gb.h#L717)) — fires once per frame; the frontend's callback writes a TSV row when recording is active.
+- `GB_set_vblank_callback` (in [Core/gb.h](Core/gb.h)) — fires once per frame; the frontend's callback writes a TSV row when recording is active.
 - `GB_set_key_state` is already routed through the frontend's input dispatch — log every call (with the current frame number) when recording is active.
 
-Frontend changes: a `recording` flag toggled by hotkey, an output file pair opened on start, the watches/dump-regions list reused from Phase 1.1 / 1.2. Model the hotkey on the existing screenshot pattern at [SDL/main.c:740](SDL/main.c#L740) — `pending_record` flag flipped on F-key, acted on in the frame loop.
+Frontend changes: a `recording` flag toggled by hotkey, an output file pair opened on start, the watches/dump-regions list reused from Phase 1.1 / 1.2. Model the hotkey on the existing `pending_screenshot` pattern in [SDL/main.c](SDL/main.c) — `pending_record` flag flipped on F-key, acted on in the frame loop.
 
 ### Output format
 
@@ -112,7 +112,7 @@ A future `libsameboy_harness.py` (ctypes/cffi against the Makefile's `lib` targe
 
 ### Migration trigger
 
-When CPU register watches OR screen hashes is actively wanted within 2–3 PRs. Most likely triggers are Phase 3 collision-query or Phase 4 FSM restructure work on the SDK side — see `kwigbo-gb-sdk/docs/internals/ROADMAP.md`.
+When CPU register watches or screen hashes are actively wanted within 2–3 PRs. Most likely triggers are Phase 3 collision-query or Phase 4 FSM restructure work on the SDK side — see [`../kwigbo-gb-sdk/docs/internals/ROADMAP.md`](../kwigbo-gb-sdk/docs/internals/ROADMAP.md).
 
 ### Costs identified at decision time (do not lose these on revisit)
 
@@ -143,7 +143,7 @@ A binjgb headless wrapper alongside the SameBoy one, both consuming the same `--
 
 ### Why this is cheap
 
-- binjgb is already cloned at `/home/ubuntu/binjgb` and vendored in the SDK at `web/tracker/static/binjgb.{js,wasm}` for the audio tracker. Native binjgb has a headless mode.
+- binjgb is already vendored in the SDK at `web/tracker/static/binjgb.{js,wasm}` for the audio tracker, and binjgb's native build has a headless mode.
 - Phase 1.1 / 1.2 watch and dump-range formats are emulator-agnostic — both wrappers emit the same TSV.
 - Trigger only on demand: run differential mode for known-tricky scenarios, not every test.
 
