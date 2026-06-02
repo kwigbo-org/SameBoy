@@ -354,7 +354,10 @@ static inline NSUInteger HFAtomicDecrement(volatile NSUInteger *ptr, BOOL barrie
 /*! Converts a long double to unsigned long long.  Assumes that val is already an integer - use floorl or ceill */
 static inline unsigned long long HFFPToUL(long double val) {
     assert(val >= 0);
-    assert(val <= (long double)ULLONG_MAX);
+    // 2^64 — strict less-than rules out the overflow window above ULLONG_MAX
+    // that the original `<= ULLONG_MAX` accidentally allowed (ULLONG_MAX rounds
+    // up to 2^64 when converted to long double).
+    assert(val < 18446744073709551616.0L);
     unsigned long long result = (unsigned long long)val;
     assert((long double)result == val);
     return result;
