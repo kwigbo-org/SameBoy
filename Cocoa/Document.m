@@ -1122,8 +1122,8 @@ again:;
     exportItem.target = self;
     [memoryContextMenu addItem:exportItem];
     [(NSView *)[hexRep view] setMenu:memoryContextMenu];
-    [(NSView *)[asciiRep view] setMenu:memoryContextMenu];
-    [(NSView *)[_lineRep view] setMenu:memoryContextMenu];
+    [(NSView *)[asciiRep view] setMenu:[memoryContextMenu copy]];
+    [(NSView *)[_lineRep view] setMenu:[memoryContextMenu copy]];
 
     self.memoryBankItem.enabled = false;
 }
@@ -2235,6 +2235,7 @@ enum GBWindowResizeAction
     GBMemoryByteArray *byteArray = (GBMemoryByteArray *)_hexController.byteArray;
     uint16_t bank = byteArray.selectedBank;
     BOOL showBank = (bank != (uint16_t)-1);
+    GB_memory_mode_t mode = byteArray.mode;
     unsigned long long baseAddr = _lineRep.valueOffset;
 
     NSMutableString *out = [NSMutableString string];
@@ -2243,20 +2244,23 @@ enum GBWindowResizeAction
     for (HFRangeWrapper *wrapper in ranges) {
         HFRange range = wrapper.HFRange;
         if (range.length == 0) continue;
-        if (!firstRange) [out appendString:@"\n"];
-        firstRange = false;
 
         unsigned char *bytes = malloc(range.length);
         if (!bytes) continue;
         [_hexController copyBytes:bytes range:range];
+
+        if (!firstRange) [out appendString:@"\n"];
+        firstRange = false;
 
         unsigned long long startAddr = baseAddr + range.location;
         unsigned long long endAddr = startAddr + range.length;
         unsigned long long lineStart = startAddr & ~0xFULL;
 
         for (unsigned long long line = lineStart; line < endAddr; line += 16) {
+            // $0000-$3FFF in ROM mode is the fixed ROM0 bank regardless of selectedBank
+            uint16_t displayBank = (mode == GBMemoryROM && line < 0x4000) ? 0 : bank;
             if (showBank) {
-                [out appendFormat:@"$%X:$%04llX:", bank, line];
+                [out appendFormat:@"$%X:$%04llX:", displayBank, line];
             }
             else {
                 [out appendFormat:@"$%04llX:", line];
@@ -2294,7 +2298,14 @@ enum GBWindowResizeAction
     savePanel.nameFieldStringValue = [NSString stringWithFormat:@"%@-memory.txt", basename];
     [savePanel beginSheetModalForWindow:_memoryWindow completionHandler:^(NSInteger result) {
         if (result == NSModalResponseOK) {
-            [formatted writeToURL:savePanel.URL atomically:true encoding:NSUTF8StringEncoding error:NULL];
+            NSError *writeError = nil;
+            BOOL ok = [formatted writeToURL:savePanel.URL
+                                 atomically:true
+                                   encoding:NSUTF8StringEncoding
+                                      error:&writeError];
+            if (!ok && writeError) {
+                [self presentError:writeError];
+            }
         }
     }];
 }
