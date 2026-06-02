@@ -518,10 +518,15 @@ $(OBJ)/%.c.o: %.c
 	-@$(MKDIR) -p $(dir $@)
 	$(CC) $(CFLAGS) $(FRONTEND_CFLAGS) $(FAT_FLAGS) -c $< -o $@
 	
-# HexFiend requires more flags
+# HexFiend requires more flags.
+# -Wno-implicit-const-int-float-conversion: HexFiend is vendored upstream code
+# with multiple `HFASSERT(floatVal <= NSUIntegerMax)`-style precision-loss
+# patterns (clang 21 / Xcode 26.5 promotes this to error). Suppressing at the
+# rule level avoids patching every site in vendored sources; headers that get
+# pulled into our own Cocoa code are fixed in-place instead.
 $(OBJ)/HexFiend/%.m.o: HexFiend/%.m
 	-@$(MKDIR) -p $(dir $@)
-	$(CC) $(CFLAGS) $(FRONTEND_CFLAGS) $(FAT_FLAGS) $(OCFLAGS) -c $< -o $@ -fno-objc-arc -include HexFiend/HexFiend_2_Framework_Prefix.pch
+	$(CC) $(CFLAGS) $(FRONTEND_CFLAGS) $(FAT_FLAGS) $(OCFLAGS) -c $< -o $@ -fno-objc-arc -Wno-implicit-const-int-float-conversion -include HexFiend/HexFiend_2_Framework_Prefix.pch
 	
 # Apple-specific code in SDL
 $(OBJ)/SDL/%.m.o: SDL/%.m
