@@ -1109,7 +1109,22 @@ again:;
         contentSize.width -= 4;
         [_memoryWindow setContentSize:contentSize];
     }
-    
+
+    NSMenu *memoryContextMenu = [[NSMenu alloc] initWithTitle:@""];
+    NSMenuItem *copyItem = [[NSMenuItem alloc] initWithTitle:@"Copy with Addresses"
+                                                      action:@selector(copyMemoryWithAddresses:)
+                                               keyEquivalent:@""];
+    copyItem.target = self;
+    [memoryContextMenu addItem:copyItem];
+    NSMenuItem *exportItem = [[NSMenuItem alloc] initWithTitle:@"Export Selection to File…"
+                                                        action:@selector(exportMemorySelectionToFile:)
+                                                 keyEquivalent:@""];
+    exportItem.target = self;
+    [memoryContextMenu addItem:exportItem];
+    [(NSView *)[hexRep view] setMenu:memoryContextMenu];
+    [(NSView *)[asciiRep view] setMenu:[memoryContextMenu copy]];
+    [(NSView *)[_lineRep view] setMenu:[memoryContextMenu copy]];
+
     self.memoryBankItem.enabled = false;
 }
 
@@ -2209,6 +2224,90 @@ enum GBWindowResizeAction
     for (NSView *view in self.memoryView.subviews) {
         [view setNeedsDisplay:true];
     }
+}
+
+- (NSString *)formattedMemoryForSelectedRanges
+{
+    if (!_hexController) return @"";
+    NSArray *ranges = _hexController.selectedContentsRanges;
+    if (!ranges.count) return @"";
+
+    GBMemoryByteArray *byteArray = (GBMemoryByteArray *)_hexController.byteArray;
+    uint16_t bank = byteArray.selectedBank;
+    BOOL showBank = (bank != (uint16_t)-1);
+    GB_memory_mode_t mode = byteArray.mode;
+    unsigned long long baseAddr = _lineRep.valueOffset;
+
+    NSMutableString *out = [NSMutableString string];
+    BOOL firstRange = true;
+
+    for (HFRangeWrapper *wrapper in ranges) {
+        HFRange range = wrapper.HFRange;
+        if (range.length == 0) continue;
+
+        unsigned char *bytes = malloc(range.length);
+        if (!bytes) continue;
+        [_hexController copyBytes:bytes range:range];
+
+        if (!firstRange) [out appendString:@"\n"];
+        firstRange = false;
+
+        unsigned long long startAddr = baseAddr + range.location;
+        unsigned long long endAddr = startAddr + range.length;
+        unsigned long long lineStart = startAddr & ~0xFULL;
+
+        for (unsigned long long line = lineStart; line < endAddr; line += 16) {
+            // $0000-$3FFF in ROM mode is the fixed ROM0 bank regardless of selectedBank
+            uint16_t displayBank = (mode == GBMemoryROM && line < 0x4000) ? 0 : bank;
+            if (showBank) {
+                [out appendFormat:@"$%X:$%04llX:", displayBank, line];
+            }
+            else {
+                [out appendFormat:@"$%04llX:", line];
+            }
+            for (unsigned long long i = line; i < line + 16; i++) {
+                if (i < startAddr || i >= endAddr) {
+                    [out appendString:@"   "];
+                }
+                else {
+                    [out appendFormat:@" %02X", bytes[i - startAddr]];
+                }
+            }
+            [out appendString:@"\n"];
+        }
+
+        free(bytes);
+    }
+    return out;
+}
+
+- (IBAction)copyMemoryWithAddresses:(id)sender
+{
+    NSString *formatted = [self formattedMemoryForSelectedRanges];
+    if (!formatted.length) return;
+    [[NSPasteboard generalPasteboard] clearContents];
+    [[NSPasteboard generalPasteboard] setString:formatted forType:NSPasteboardTypeString];
+}
+
+- (IBAction)exportMemorySelectionToFile:(id)sender
+{
+    NSString *formatted = [self formattedMemoryForSelectedRanges];
+    if (!formatted.length) return;
+    NSSavePanel *savePanel = [NSSavePanel savePanel];
+    NSString *basename = self.fileURL.path.lastPathComponent.stringByDeletingPathExtension ?: @"memory";
+    savePanel.nameFieldStringValue = [NSString stringWithFormat:@"%@-memory.txt", basename];
+    [savePanel beginSheetModalForWindow:_memoryWindow completionHandler:^(NSInteger result) {
+        if (result == NSModalResponseOK) {
+            NSError *writeError = nil;
+            BOOL ok = [formatted writeToURL:savePanel.URL
+                                 atomically:true
+                                   encoding:NSUTF8StringEncoding
+                                      error:&writeError];
+            if (!ok && writeError) {
+                [self presentError:writeError];
+            }
+        }
+    }];
 }
 
 - (GB_gameboy_t *) gameboy
