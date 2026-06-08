@@ -817,12 +817,19 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
 
 - (void)batteryTimerExpired
 {
-    if (_dirtyBattery && !GB_get_battery_dirty(&_gb)) {
-        GB_save_battery(&_gb, self.savPath.UTF8String);
-    }
-    
-    _dirtyBattery = GB_get_battery_dirty(&_gb);
-    GB_clear_battery_dirty(&_gb);
+    // Serialize through the emulator thread: GB_save_battery and the dirty
+    // accessors trip GB_ASSERT_NOT_RUNNING_OTHER_THREAD when called from the
+    // main thread mid-step. Capture savPath on the caller so the block
+    // doesn't read a Cocoa property cross-thread.
+    NSString *savPath = self.savPath;
+    [self performAtomicBlock:^{
+        if (_dirtyBattery && !GB_get_battery_dirty(&_gb)) {
+            GB_save_battery(&_gb, savPath.UTF8String);
+        }
+
+        _dirtyBattery = GB_get_battery_dirty(&_gb);
+        GB_clear_battery_dirty(&_gb);
+    }];
 }
 
 - (NSFont *)debuggerFontOfSize:(unsigned)size
