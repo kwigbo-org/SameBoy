@@ -817,12 +817,17 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
 
 - (void)batteryTimerExpired
 {
-    if (_dirtyBattery && !GB_get_battery_dirty(&_gb)) {
-        GB_save_battery(&_gb, self.savPath.UTF8String);
-    }
-    
-    _dirtyBattery = GB_get_battery_dirty(&_gb);
-    GB_clear_battery_dirty(&_gb);
+    // Serialize through the emulator thread — GB_save_battery (and the dirty
+    // flag accessors) trip GB_ASSERT_NOT_RUNNING_OTHER_THREAD if called from
+    // the main thread while the emulator is mid-step.
+    [self performAtomicBlock:^{
+        if (_dirtyBattery && !GB_get_battery_dirty(&_gb)) {
+            GB_save_battery(&_gb, self.savPath.UTF8String);
+        }
+
+        _dirtyBattery = GB_get_battery_dirty(&_gb);
+        GB_clear_battery_dirty(&_gb);
+    }];
 }
 
 - (NSFont *)debuggerFontOfSize:(unsigned)size
