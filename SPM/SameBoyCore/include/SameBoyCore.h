@@ -15,5 +15,12 @@
 #define GB_DISABLE_DEBUGGER
 #endif
 
+/* SwiftPM never propagates the target's cSettings defines to importers, but
+   undefine GB_INTERNAL here anyway so the opaque-handle guarantee is enforced
+   by this header rather than assumed from build-system behavior. */
+#ifdef GB_INTERNAL
+#undef GB_INTERNAL
+#endif
+
 #include "../../../Core/gb.h"
 #include "../../../Core/memory.h"

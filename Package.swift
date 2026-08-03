@@ -32,7 +32,7 @@ let package = Package(
                 "Core/sm83_disassembler.c",
                 "Core/symbol_hash.c",
                 "Core/cheat_search.c",
-                // .inc tables are textually #included by display.c/sgb.c
+                // .inc tables are textually #included by gb.c/sgb.c
                 "Core/graphics",
             ],
             sources: ["Core"],
