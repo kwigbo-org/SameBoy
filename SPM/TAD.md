@@ -13,7 +13,7 @@
 | 3 | Defines: `GB_DISABLE_DEBUGGER` only (of the feature flags) + `GB_INTERNAL` for target compilation | `make _ios` passes exactly `-DGB_DISABLE_DEBUGGER`; `gb.h` derives `GB_DISABLE_CHEAT_SEARCH` from it (gb.h lines 12–20), so no extra disable flags are needed. `GB_INTERNAL` matches the Makefile's `Core/%.c.o` rule (line 490). |
 | 4 | `GB_VERSION` pinned as a literal in `Package.swift` | `save_state.c` needs it for the BESS name string; SPM manifests can't read `version.mk`. Comment in the manifest marks the sync point. |
 | 5 | Public module surface = `Core/gb.h` + `Core/memory.h` via custom module map, `GB_INTERNAL` NOT defined | Consumers get only the opaque-handle API. The shim header defines `GB_DISABLE_DEBUGGER` before including `gb.h` so the consumer-visible declaration set matches what was actually compiled (debugger/cheat-search APIs hidden). |
-| 6 | Target `path: "."` + explicit `sources: ["Core"]`, all SPM-specific files under `SPM/` | Keeps the additions isolated (root `Package.swift`, `SPM/` dir, two `.gitignore` lines) so upstream syncs stay clean, while letting the module map + shim live outside `Core/`. Leaves room for a future sibling target without restructuring. |
+| 6 | ~~Target `path: "."` + explicit `sources: ["Core"]`, all SPM-specific files under `SPM/`~~ **Amended 2026-08-03:** target `path: "Core"`, public headers at `Core/include/` | Original rationale (isolation) missed that SwiftPM auto-scans the entire target path for bundle resources regardless of the `sources` filter — a root-scoped target picked up `Cocoa/PopoverView.xib` (macOS xib) and hard-failed iOS builds (GB Editor iOS bug report 2026-08-03). Scoping the path to `Core/` leaves nothing for the resource scan to mis-process (`Core/` holds only `.c`/`.h`/`.inc`, verified). `publicHeadersPath` must live inside the target path, so the module map + shim moved to `Core/include/` — a two-file upstream-sync footprint inside `Core/`, accepted as the cost of a working iOS build. Future targets scope their own paths (`AppleCommon/`) the same way. |
 | 7 | Only `Core/` is distributed; `iOS/` and `HexFiend/` never enter a package target | Both are excepted from the repository `LICENSE`; `iOS/` requires written permission for App Store distribution. Guardrail stated in `Package.swift`, `SPM/README.md`, and here. |
 | 8 | Platforms: iOS 17, macOS 13; `cLanguageStandard: .gnu11`; no `unsafeFlags` | macOS enables the consumer's headless `swift test`. The Makefile's `-std=gnu11` must come from `cLanguageStandard` because `unsafeFlags` would make the package unusable as a remote dependency. |
 | 9 | Release tagged `v0.1.0-spm` after merge | Consumer pins it in `Package.resolved`. Suffix distinguishes SPM packaging releases from upstream SameBoy version tags (`v1.0.x`). |
@@ -21,17 +21,17 @@
 ## Proposed design surface
 
 ```
-Package.swift                         swift-tools 5.9, package "SameBoy"
+Package.swift                swift-tools 5.9, package "SameBoy"
 └── product .library("SameBoyCore")
-    └── target SameBoyCore
-        path "."  sources ["Core"]  exclude [4 CORE_FILTER files, Core/graphics]
-        publicHeadersPath "SPM/SameBoyCore/include"
+    └── target SameBoyCore                        (amended 2026-08-03)
+        path "Core"  exclude [4 CORE_FILTER files, graphics]
+        publicHeadersPath "include"
         cSettings: GB_INTERNAL, GB_DISABLE_DEBUGGER, GB_VERSION="1.0.3",
-                   _GNU_SOURCE, _USE_MATH_DEFINES, -I. -IAppleCommon
+                   _GNU_SOURCE, _USE_MATH_DEFINES, -I. -I../AppleCommon
 
-SPM/SameBoyCore/include/module.modulemap   module SameBoyCore { header "SameBoyCore.h" }
-SPM/SameBoyCore/include/SameBoyCore.h      defines GB_DISABLE_DEBUGGER, includes
-                                           Core/gb.h + Core/memory.h (relative paths)
+Core/include/module.modulemap   module SameBoyCore { header "SameBoyCore.h" }
+Core/include/SameBoyCore.h      defines GB_DISABLE_DEBUGGER, undefs GB_INTERNAL,
+                                includes ../gb.h + ../memory.h
 ```
 
 Consumer contract reachable through the module (all verified present in the
@@ -70,3 +70,11 @@ public headers): `GB_alloc` / `GB_init` / `GB_reset` / `GB_free` / `GB_dealloc`,
 - 2026-08-03 — Request received from GB Editor iOS lane; fork verified @ `b0fd2ab`.
 - 2026-08-03 — Step 1 implemented on `next`; native validation harness passed
   (17 core objects, consumer TU, link, smoke run, negative check).
+- 2026-08-03 — PR #7 merged (squash `f2af334`); tagged `v0.1.0-spm`.
+- 2026-08-03 — **Amendment (truth-fix):** GB Editor iOS lane reported the iOS
+  build failing on `Cocoa/PopoverView.xib` — SwiftPM's resource auto-scan
+  covers the whole target path regardless of `sources`, which Decision 6's
+  original form missed. Target re-scoped to `path: "Core"`, headers moved to
+  `Core/include/`. macOS host builds could not catch this (macOS toolchain
+  tolerates macOS xibs); iOS-destination build added to the step 2 checklist.
+  Tag `v0.1.1-spm` after merge.

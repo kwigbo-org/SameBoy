@@ -1,9 +1,16 @@
 # Swift Package Manager distribution
 
-This directory, together with the root `Package.swift`, is a fork-only
-(kwigbo-org) addition that packages the SameBoy emulator core as a
-**source-based SPM C target**. Everything SPM-specific lives here or in
-`Package.swift` so upstream (`LIJI32/SameBoy`) syncs stay clean.
+This directory, together with the root `Package.swift` and `Core/include/`,
+is a fork-only (kwigbo-org) addition that packages the SameBoy emulator core
+as a **source-based SPM C target**. The SPM footprint is deliberately small
+(this docs dir, the manifest, and the two-file `Core/include/` headers dir)
+so upstream (`LIJI32/SameBoy`) syncs stay clean.
+
+The target path is scoped to `Core/` because SwiftPM auto-scans the entire
+target path for bundle resources regardless of any `sources` filter — a
+root-scoped target picks up macOS xibs from `Cocoa/`/`QuickLook/` and fails
+iOS builds. That is also why the public headers live in `Core/include/`
+rather than under `SPM/`: `publicHeadersPath` must be inside the target path.
 
 ## `SameBoyCore` target
 
@@ -16,10 +23,10 @@ This directory, together with the root `Package.swift`, is a fork-only
   `GB_DISABLE_CHEAT_SEARCH` from it) plus `GB_INTERNAL` for the target's own
   compilation only, matching the Makefile's `Core/%.c.o` rule. `GB_VERSION`
   is pinned in `Package.swift` — keep it in sync with `version.mk`.
-- **Module surface:** `include/module.modulemap` + `include/SameBoyCore.h`
-  expose `Core/gb.h` and `Core/memory.h` (for `GB_safe_read_memory`) as the
-  importable `SameBoyCore` module, without `GB_INTERNAL` — consumers see the
-  opaque-handle API only.
+- **Module surface:** `Core/include/module.modulemap` +
+  `Core/include/SameBoyCore.h` expose `Core/gb.h` and `Core/memory.h` (for
+  `GB_safe_read_memory`) as the importable `SameBoyCore` module, without
+  `GB_INTERNAL` — consumers see the opaque-handle API only.
 
 ## License scope
 
@@ -34,7 +41,8 @@ target.**
 A second target `SameBoyApple` (depending on `SameBoyCore`) can be added
 later without restructuring: wrap `AppleCommon/` (`GBViewMetal.m` video,
 `GBAudioClient.m` audio), gate it to iOS/macOS, and link Metal +
-AVFoundation. It gets its own headers directory under
-`SPM/SameBoyApple/include/`. `SameBoyCore` stays UIKit/Metal-free so headless
-`swift test` keeps working on any host. Swift emulator wrappers belong in
+AVFoundation. Scope its path to `AppleCommon/` with its own
+`AppleCommon/include/` headers dir (same resource-scan rule applies).
+`SameBoyCore` stays UIKit/Metal-free so headless `swift test` keeps working
+on any host. Swift emulator wrappers belong in
 consuming apps, not in this repository.

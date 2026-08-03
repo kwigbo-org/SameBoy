@@ -22,5 +22,5 @@
 #undef GB_INTERNAL
 #endif
 
-#include "../../../Core/gb.h"
-#include "../../../Core/memory.h"
+#include "../gb.h"
+#include "../memory.h"
