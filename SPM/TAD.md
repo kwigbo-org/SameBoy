@@ -58,9 +58,15 @@ public headers): `GB_alloc` / `GB_init` / `GB_reset` / `GB_free` / `GB_dealloc`,
 ## Downstream commitments
 
 - **GB Editor iOS lane:** thin Swift wrapper over the module (explicitly out of
-  scope for this repo); pin `v0.1.0-spm` in `Package.resolved`.
-- **Mac lane / operator:** step 2 build-check (this Linux box has no Swift
-  toolchain or Apple SDKs — per lane build-host split).
+  scope for this repo); pin the current SPM tag in `Package.resolved`.
+  **OPEN as of 2026-08-05:** that lane still pins `0.1.0-spm` (`f2af334`) in
+  both `GBEmulator/Package.swift` and its two `Package.resolved` files — the
+  pre-fix commit whose iOS build fails on `Cocoa/PopoverView.xib`. It needs
+  `0.1.1-spm` (`70066ea`). Verified source-compatible: the wrapper's 13-symbol
+  API surface compiles unchanged against v0.1.1-spm for both iOS destinations.
+- **Mac lane / operator:** step 2 build-check (the Linux box has no Swift
+  toolchain or Apple SDKs — per lane build-host split). **Done 2026-08-03**,
+  see Progress log.
 - **This lane (P1, future TAD):** `SameBoyApple` target wrapping `AppleCommon/`
   (Metal video + audio), depending on `SameBoyCore`, gated to iOS/macOS.
   Design room reserved (Decision 6); no restructuring required.
@@ -78,3 +84,26 @@ public headers): `GB_alloc` / `GB_init` / `GB_reset` / `GB_free` / `GB_dealloc`,
   `Core/include/`. macOS host builds could not catch this (macOS toolchain
   tolerates macOS xibs); iOS-destination build added to the step 2 checklist.
   Tag `v0.1.1-spm` after merge.
+- 2026-08-03 — **Step 2 PASSED** on the operator's Mac (Xcode 26.5 / Apple
+  Swift 6.3.2) against `70066ea` = `v0.1.1-spm`. All four acceptance checks:
+  1. `swift build` (macOS host) — clean, 17 core TUs (21 `Core/*.c` minus the
+     4 `CORE_FILTER` files), no warnings.
+  2. iOS-destination builds of the package — `xcodebuild -scheme SameBoy`
+     against both `platform=iOS Simulator,name=iPhone 16 Pro` and
+     `generic/platform=iOS`: **BUILD SUCCEEDED**. This is the check v0.1.0-spm
+     would have failed; the resource-scan regression is confirmed fixed.
+     (Note the generated scheme is `SameBoy`, the package name — not
+     `SameBoyCore`, which errors as "no such scheme".)
+  3. Link-and-run smoke (macOS): `GB_alloc` → `GB_init` →
+     `GB_load_rom_from_buffer` → 10 × `GB_run_frame` → `GB_safe_read_memory`
+     readback. Real emulation observed (10 vblanks; DIV advanced 0 → 183).
+     Consumers must wire `GB_set_rgb_encode_callback` and
+     `GB_set_pixels_output` first — the core calls rgb-encode unconditionally
+     and segfaults on NULL.
+  4. Negative check — the debugger/cheat-search surface is absent from the
+     public module, as designed.
+  Additionally, the GB Editor iOS wrapper's exact 13-symbol API surface was
+  compiled against the module for both iOS destinations: **BUILD SUCCEEDED**,
+  so the consumer's re-pin to `v0.1.1-spm` is source-compatible.
+  Not covered: no iOS *runtime* execution, and the consumer's own Xcode
+  project integration remains unbuilt — that acceptance belongs to their lane.
