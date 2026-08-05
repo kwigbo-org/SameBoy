@@ -27,8 +27,8 @@ doesn't drive them. This is a wiring job, not new emulation work.
 | D2 | **Bracket by stack pointer, not by "the next `ret`".** At entry capture `SP_entry` and `return_addr = read16(SP_entry)`; the call completes when `PC == return_addr && SP >= SP_entry + 2`. | Naive next-`ret` matching breaks on early returns, tail calls, and multi-exit routines. An SP-keyed stack of active frames also handles reentrancy and recursion — `Music.tick` runs from a timer IRQ in-game and can be preempted. |
 | D3 | **Entry match is bank-qualified.** | `GB_symbol_t` carries a `bank` field (`Core/symbol_hash.h`), but `resolve_watch_token` discards it (`Tester/main.c` — `out->addr = sym->addr` only). Harmless for the RAM watches `--watch` was built for; wrong for code. A routine in the banked region `0x4000–0x7FFF` would false-trigger whenever any *other* bank maps that address. |
 | D4 | **Report inclusive *and* exclusive of interrupt preemption, as separate columns.** | Since `Music.tick` itself runs from a timer IRQ, any interrupt taken *inside* the bracket adds its cycles to an inclusive measure. A budget meter wants exclusive. Detect entry to `0x40/0x48/0x50/0x58/0x60` while bracketed and accumulate a subtraction window. Emitting both lets the consumer choose without a re-spin. |
-| D5 | **Accumulate true per-step `GB_run` deltas; do not inherit the frame chunk.** | The `139810` constant is commented "intentionally not the actual length of a frame" and exists for watch cadence only. Same root cause as D1. |
-| D6 | **`--profile-out` is incompatible with `--jobs > 1`; reject at arg-parse.** | Direct precedent: `--trace-out` already rejects it (`Tester/main.c`) because forked runs interleave writes into one file. |
+| D5 | **Accumulate true per-step `GB_run` deltas; do not inherit the frame chunk.** | The `139810` constant is commented "intentionally not the actual length of a frame"; it drives the tester's whole per-frame cadence (`frames++` → `test_length` termination, button scripts, trace rows) — a scheduling boundary, not cycle accounting. Same root cause as D1. |
+| D6 | **`--profile-out` is incompatible with `--jobs > 1`; reject the combination.** | Direct precedent: `--trace-out` already rejects it (`Tester/main.c:644–647`) because forked runs interleave writes into one file. The existing check runs in the first-iteration harness-init block (post-parse), not at arg-parse; matching that placement is fine — the decision is the rejection, not its location. |
 | D7 | **Output is CSV, one row per completed invocation, plus a summary trailer.** | The request asks for machine-parseable per-invocation counts "and/or max/total/count". Per-call rows are strictly more informative; count/total/max derive from them, and a trailer saves the harness a reduction pass. |
 | D8 | **Profiling is inert unless `--profile` is passed — no behavior change to existing modes.** | The SDK's existing golden harness must stay green; acceptance criterion from the request. |
 
@@ -77,7 +77,7 @@ during the draft phase only.*
 | 1 | Implement `--profile` / `--profile-out` in `Tester/main.c` (**Linux lane** — needs `make tester`) | `make tester` builds clean; run against `bin/MusicROM.gb` (VBlank-driven, no reentrancy — the clean bracket the request recommends starting from) and confirm per-call rows; confirm existing modes are unchanged with `--profile` absent | Revert the PR squash commit |
 | 2 | Measure the worst-case fixture song (4 voices triggering on one tick + a loop-boundary re-fetch) under both ROMs (**Linux lane**) | Max per-invocation figure is stable across repeat runs — determinism is the whole point of replacing the Emulicious reading | Same |
 | 3 | SDK-side wiring: pytest golden + `codegen/song_cost.py` `PROFILES` (**GameBoy Dev lane**, consumer repo) | Golden pins the max; a deliberately regressed tick trips the guard | Revert the consumer PR |
-| 4 | `--help` + README update (**Linux lane**) | Options documented; the ~300-LOC `--watch` addition is the size precedent | Same |
+| 4 | `--help` + README update (**Linux lane**) | Options documented; the ~260-LOC `--watch` addition is the size precedent | Same |
 
 ## Client review status
 
@@ -90,10 +90,11 @@ during the draft phase only.*
   the consumer repo, referencing this TAD once merged.
 - **SameBoy Manager (Linux box)** — steps 1, 2, 4. These cannot be done from
   the Mac lane: `make tester` and the SDK harness both live on the Linux box.
-- **Manager lane** — this fork is now a two-host lane, which
-  `agent-server-manager`'s lane table and *Cross-host setup* section do not yet
-  reflect. Already raised with Manager directly by the operator; noted here so
-  the follow-up survives in git rather than only in a conversation.
+- **Manager lane** — *resolved before merge:* the draft flagged that
+  `agent-server-manager` didn't yet reflect this fork's two-host shape; as of
+  2026-08-05 (verified during PR #10 review round 1) Manager's lane table
+  lists SameBoy Manager as **Linux + Mac (cross-host)** and its `CLAUDE.md`
+  has a *Cross-host setup* section. Nothing remains owed.
 
 ## Progress log
 
@@ -105,5 +106,17 @@ during the draft phase only.*
   compiled into the tester (core objects only take `-DGB_DISABLE_DEBUGGER`
   when `DISABLE_DEBUGGER` is set), `--sym` / `--watch` / `--script` /
   `--trace-out` all exist, and the run loop already inspects `gb.pc` between
-  `GB_run` calls, so instruction-granular PC matching is established
-  precedent rather than new ground.
+  `GB_run` calls (`Tester/main.c:809`) — with the caveat carried by that
+  check's own comment: during vblank, PC "might not point to the next
+  instruction," so the precedent is a single guarded detector, not general
+  PC matching. D2's bracket tolerates a missed observation: the SP condition
+  (`SP >= SP_entry + 2`) prevents a coincidental PC value from closing a
+  frame early, and a genuine return that goes unobserved on one step is
+  caught on a later one.
+- 2026-08-05 — PR #10 opened; review round 1 (`--lite` panel, docs-only
+  scope) returned four accuracy fixes (D5 phrasing, D6 precedent placement,
+  PC-precedent caveat, `--watch` LOC figure) and caught that the Manager-docs
+  downstream commitment had already been resolved; all folded in. OQ1–OQ4
+  handed to the SDK lane via
+  `kwigbo-gb-sdk/feedback/SAMEBOY_profile_TAD_open_questions.md`; their
+  STATUS:CLEAN on PR #10 is the merge gate.
