@@ -141,3 +141,15 @@ divergence self-explaining rather than mysterious.
 - Step 2 note: the worst-case **fixture song** is built by the SDK harness
   (their step 3); the stable-max validation for it rides with that wiring.
   Both currently-existing ROMs are measured and deterministic (above).
+- 2026-08-05 — Review round 2 (full 4-panel, code now in the diff) → three
+  fixes applied, all verified: (1) multi-ROM `--profile-out` no longer
+  truncates per ROM — first open truncates, later ROMs in the same
+  invocation append under their `# rom:` headers (sonnet MEDIUM; two-ROM
+  run confirmed both sections survive); (2) defensive clamp so a latent
+  IRQ-attribution bug would degrade to excl=0 instead of an unsigned wrap
+  poisoning the summary (sonnet LOW); (3) IRQ windows are backdated by the
+  dispatch step's ticks, so the ~20 T-cycle dispatch cost is excluded from
+  `t_cycles_excl` and a routine sitting at a vector address can never be
+  charged with its own runtime via equal timestamps (codex HIGH). CSV
+  output for both validation ROMs is byte-identical before/after the fixes
+  (`irq_count` was 0 throughout), so the recorded numbers stand.

@@ -393,6 +393,10 @@ static void profile_emit(profile_frame_t *f)
     profile_sym_t *s = &profile_syms[f->sym_index];
     uint64_t incl_ticks = profile_ticks - f->t0;
     uint64_t excl_ticks = incl_ticks - f->irq_sub;
+    /* The charge logic keeps irq_sub <= incl_ticks by construction; clamp so
+       a latent attribution bug degrades to excl==0 instead of silently
+       poisoning the summary max with an unsigned wrap. */
+    if (f->irq_sub > incl_ticks) excl_ticks = 0;
     /* D1/D9: T-cycles = 8MHz ticks / 2 at single speed */
     unsigned long long incl = incl_ticks / 2;
     unsigned long long excl = excl_ticks / 2;
@@ -408,7 +412,7 @@ static void profile_emit(profile_frame_t *f)
     if (incl > s->max_incl) s->max_incl = incl;
 }
 
-static void profile_step(GB_gameboy_t *_gb)
+static void profile_step(GB_gameboy_t *_gb, unsigned step_ticks)
 {
     uint16_t pc = _gb->pc;
     uint16_t sp = _gb->registers[GB_REGISTER_SP];
@@ -459,7 +463,12 @@ static void profile_step(GB_gameboy_t *_gb)
                 irq_window_t *w = &irq_windows[irq_depth++];
                 w->sp_entry = sp;
                 w->return_addr = profile_read16(_gb, sp);
-                w->t0 = profile_ticks;
+                /* The step that landed PC on the vector WAS the dispatch:
+                   backdate the window so the dispatch cost is excluded too,
+                   and so a profiled routine sitting at a vector address gets
+                   a strictly later t0 than the window and is never charged
+                   with its own runtime. */
+                w->t0 = profile_ticks - step_ticks;
             }
         }
     }
@@ -1087,7 +1096,14 @@ int main(int argc, char **argv)
             if (!resolve_profiles(profile_arg)) {
                 exit(1);
             }
-            profile_file = profile_filename ? fopen(profile_filename, "w") : stdout;
+            /* Truncate on the first ROM only; later ROMs in the same
+               invocation append, delimited by their "# rom:" headers, instead
+               of silently discarding the previous ROM's data. A fresh
+               invocation still starts clean. */
+            static bool profile_file_reused;
+            profile_file = profile_filename ?
+                           fopen(profile_filename, profile_file_reused ? "a" : "w") : stdout;
+            profile_file_reused = true;
             if (!profile_file) {
                 fprintf(stderr, "Failed to open profile file '%s'\n", profile_filename);
                 exit(1);
@@ -1110,7 +1126,7 @@ int main(int argc, char **argv)
             cycles += step_ticks;
             if (profile_file) { /* D8: inert unless --profile was passed */
                 profile_ticks += step_ticks;
-                profile_step(&gb);
+                profile_step(&gb, step_ticks);
             }
             if (cycles >= 139810) { /* Approximately 1/60 a second. Intentionally not the actual length of a frame. */
                 dump_trace_row(&gb);
