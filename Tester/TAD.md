@@ -1,0 +1,109 @@
+# TAD — function-cycle profiling mode for `sameboy_tester`
+
+**Status:** draft, pending review.
+**Requested by:** kwigbo-gb-sdk engine lane (SONG_FORMAT arc, that TAD's D11).
+**Implementation host:** Linux box — needs `make tester` and the SDK harness.
+See [`../CLAUDE.md`](../CLAUDE.md) for the two-host split.
+**Drafted on:** the operator's Mac, 2026-08-05.
+
+## Problem
+
+The SONG_FORMAT audio arc needs the driver's per-tick cost (`Music.tick`)
+measured in real cycles rather than the hand-estimated "~600 cy" currently
+quoted across five SDK docs. The number gates the audio arc's Phase B and
+calibrates the iPad editor's budget meter, so it must be **automated and
+repeatable** inside the SDK's pytest harness — not a one-shot manual reading.
+Emulicious, the current manual method, merges local labels and isn't
+scriptable.
+
+The core already has every primitive needed; the headless tester simply
+doesn't drive them. This is a wiring job, not new emulation work.
+
+## Decisions
+
+| # | Decision | Rationale |
+|---|---|---|
+| D1 | **Report T-cycles, and name the unit in the output header.** | `GB_run` returns *8MHz ticks*, not T-cycles (`Core/gb.h` — "Returns the time passed, in 8MHz ticks"). On DMG single-speed, T-cycles = ticks ÷ 2. The run loop's `139810` "≈1/60 s" constant is in 8MHz ticks — that is 69,905 T-cycles, adjacent to the true 70,224. Emitting raw deltas labelled T-cycles makes every budget assertion **2× wrong**, and a budget calibrated against an inflated first measurement becomes self-consistent and stops looking wrong. |
+| D2 | **Bracket by stack pointer, not by "the next `ret`".** At entry capture `SP_entry` and `return_addr = read16(SP_entry)`; the call completes when `PC == return_addr && SP >= SP_entry + 2`. | Naive next-`ret` matching breaks on early returns, tail calls, and multi-exit routines. An SP-keyed stack of active frames also handles reentrancy and recursion — `Music.tick` runs from a timer IRQ in-game and can be preempted. |
+| D3 | **Entry match is bank-qualified.** | `GB_symbol_t` carries a `bank` field (`Core/symbol_hash.h`), but `resolve_watch_token` discards it (`Tester/main.c` — `out->addr = sym->addr` only). Harmless for the RAM watches `--watch` was built for; wrong for code. A routine in the banked region `0x4000–0x7FFF` would false-trigger whenever any *other* bank maps that address. |
+| D4 | **Report inclusive *and* exclusive of interrupt preemption, as separate columns.** | Since `Music.tick` itself runs from a timer IRQ, any interrupt taken *inside* the bracket adds its cycles to an inclusive measure. A budget meter wants exclusive. Detect entry to `0x40/0x48/0x50/0x58/0x60` while bracketed and accumulate a subtraction window. Emitting both lets the consumer choose without a re-spin. |
+| D5 | **Accumulate true per-step `GB_run` deltas; do not inherit the frame chunk.** | The `139810` constant is commented "intentionally not the actual length of a frame" and exists for watch cadence only. Same root cause as D1. |
+| D6 | **`--profile-out` is incompatible with `--jobs > 1`; reject at arg-parse.** | Direct precedent: `--trace-out` already rejects it (`Tester/main.c`) because forked runs interleave writes into one file. |
+| D7 | **Output is CSV, one row per completed invocation, plus a summary trailer.** | The request asks for machine-parseable per-invocation counts "and/or max/total/count". Per-call rows are strictly more informative; count/total/max derive from them, and a trailer saves the harness a reduction pass. |
+| D8 | **Profiling is inert unless `--profile` is passed — no behavior change to existing modes.** | The SDK's existing golden harness must stay green; acceptance criterion from the request. |
+
+## Proposed design surface
+
+```
+--profile <symbol>[,<symbol>...]   bracket each symbol entry→return, record cycles
+--profile-out <path>               CSV destination (default: stdout)
+```
+
+Symbol tokens resolve through the existing `--sym` path (hex literal or a name
+from the `.sym` map), extended per D3 to retain the bank.
+
+Schema (values shown as `<n>` — this is a format illustration, not measured
+data):
+
+```csv
+symbol,bank,call_index,entry_frame,t_cycles_incl,t_cycles_excl,irq_count
+Music.tick,3,0,12,<n>,<n>,0
+Music.tick,3,1,13,<n>,<n>,1
+# summary symbol=Music.tick calls=<n> total_t_cycles_excl=<n> max_t_cycles_excl=<n> max_t_cycles_incl=<n>
+```
+
+Column names carry the unit explicitly (D1). `irq_count` is the number of
+interrupts taken inside the bracket — it makes any inclusive/exclusive
+divergence self-explaining rather than mysterious.
+
+## Open Questions
+
+*For the kwigbo-gb-sdk engine lane. These set the format that lane parses, so
+they fold into the Decisions table before merge — canon allows Open Questions
+during the draft phase only.*
+
+- **OQ1** — Confirm T-cycles as the reported unit (D1) rather than raw 8MHz
+  ticks. If the SDK would rather divide on its side, D1 inverts.
+- **OQ2** — Which column does the pytest golden assert against:
+  `t_cycles_excl` (recommended, D4) or `t_cycles_incl`?
+- **OQ3** — CLI disambiguation syntax when a symbol name is not unique across
+  banks (D3): `bank:name`, or rely on `.sym` uniqueness and error on collision?
+- **OQ4** — CSV (D7) or JSON? CSV assumed; the request said "CSV/JSON".
+
+## Steps
+
+| Step | Action | Validate | Rollback |
+|---|---|---|---|
+| 1 | Implement `--profile` / `--profile-out` in `Tester/main.c` (**Linux lane** — needs `make tester`) | `make tester` builds clean; run against `bin/MusicROM.gb` (VBlank-driven, no reentrancy — the clean bracket the request recommends starting from) and confirm per-call rows; confirm existing modes are unchanged with `--profile` absent | Revert the PR squash commit |
+| 2 | Measure the worst-case fixture song (4 voices triggering on one tick + a loop-boundary re-fetch) under both ROMs (**Linux lane**) | Max per-invocation figure is stable across repeat runs — determinism is the whole point of replacing the Emulicious reading | Same |
+| 3 | SDK-side wiring: pytest golden + `codegen/song_cost.py` `PROFILES` (**GameBoy Dev lane**, consumer repo) | Golden pins the max; a deliberately regressed tick trips the guard | Revert the consumer PR |
+| 4 | `--help` + README update (**Linux lane**) | Options documented; the ~300-LOC `--watch` addition is the size precedent | Same |
+
+## Client review status
+
+- [ ] kwigbo-gb-sdk (GameBoy Dev) — owns the parsed format; OQ1–OQ4 are theirs
+  to close
+
+## Downstream commitments
+
+- **GameBoy Dev lane** — step 3 (pytest golden + `song_cost.py` `PROFILES`) in
+  the consumer repo, referencing this TAD once merged.
+- **SameBoy Manager (Linux box)** — steps 1, 2, 4. These cannot be done from
+  the Mac lane: `make tester` and the SDK harness both live on the Linux box.
+- **Manager lane** — this fork is now a two-host lane, which
+  `agent-server-manager`'s lane table and *Cross-host setup* section do not yet
+  reflect. Already raised with Manager directly by the operator; noted here so
+  the follow-up survives in git rather than only in a conversation.
+
+## Progress log
+
+- 2026-08-05 — Request received from the kwigbo-gb-sdk engine lane. Drafted on
+  the Mac after a read-only review of the request against the code; six
+  findings folded in as D1–D6. Two of them would have produced silently wrong
+  numbers: the 8MHz-tick/T-cycle unit confusion (D1) and bank-blind symbol
+  matching (D3). The request's other premises verified — the debugger *is*
+  compiled into the tester (core objects only take `-DGB_DISABLE_DEBUGGER`
+  when `DISABLE_DEBUGGER` is set), `--sym` / `--watch` / `--script` /
+  `--trace-out` all exist, and the run loop already inspects `gb.pc` between
+  `GB_run` calls, so instruction-granular PC matching is established
+  precedent rather than new ground.
