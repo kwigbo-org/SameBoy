@@ -67,7 +67,7 @@ divergence self-explaining rather than mysterious.
 | 1 | Implement `--profile` / `--profile-out` in `Tester/main.c` (**Linux lane** — needs `make tester`) | `make tester` builds clean; run against `bin/MusicROM.gb` (VBlank-driven, no reentrancy — the clean bracket the request recommends starting from) and confirm per-call rows; confirm existing modes are unchanged with `--profile` absent | Revert the PR squash commit |
 | 2 | Measure the worst-case fixture song (4 voices triggering on one tick + a loop-boundary re-fetch) under both ROMs (**Linux lane**) | Max per-invocation figure is stable across repeat runs — determinism is the whole point of replacing the Emulicious reading | Same |
 | 3 | SDK-side wiring: pytest golden + `codegen/song_cost.py` `PROFILES` (**GameBoy Dev lane**, consumer repo) | Golden pins the max; a deliberately regressed tick trips the guard | Revert the consumer PR |
-| 4 | `--help` + README update (**Linux lane**) | Options documented; the ~260-LOC `--watch` addition is the size precedent | Same |
+| 4 | Usage string + `Tester/README.md` (**Linux lane** — no tester README existed; created) | Options + CSV contract documented; the `--watch` addition (`265d676`, 304 insertions) is the size precedent | Same |
 
 ## Client review status
 
@@ -115,3 +115,29 @@ divergence self-explaining rather than mysterious.
   STATUS:CLEAN posted on PR #10. Folded as D9–D12; Open Questions section
   retired. Client gate satisfied — implementation (steps 1, 4) proceeds as
   follow-up commits on this PR per canon pattern (a).
+- 2026-08-05 — **Steps 1 + 4 implemented and validated** (Linux). `make
+  tester` clean under `-Werror`. Evidence:
+  - `MusicROM.gb` (VBlank-driven), 10 s: 514 completed brackets, **620
+    t_cycles_excl every call** — right on the SDK's hand-estimated "~600 cy"
+    (raw 8MHz ticks mislabeled would have read ~1240; D1's 2× trap
+    demonstrated against real data).
+  - `Game.gb` (timer-IRQ-driven) with `--start`, 15 s: 798 calls, max 2504
+    t_cycles_excl (4-voice trigger worst case), `irq_count` 0 throughout —
+    consistent with the driver running IME-off inside its own handler.
+  - Determinism: byte-identical CSVs across repeat runs for both ROMs.
+  - D8 non-interference: screenshot hash identical with and without
+    `--profile` on the same ROM/length.
+  - Error paths: unknown symbol → exit 1; `--profile` with `--jobs 2` →
+    rejected; `--profile-out` without `--profile` → rejected; hex-literal
+    token (`0x022f`) profiles without `--sym` and matches the named-symbol
+    numbers.
+  - Deviation from D6's letter, recorded: the incompatibility check rejects
+    `--profile` (not just `--profile-out`) under `--jobs > 1`, because the
+    default stdout destination interleaves identically. Placement matches
+    the `--trace-out` precedent (harness-init block).
+  - Step 4: usage string updated; `Tester/README.md` created (none existed)
+    documenting options + the CSV parse contract. LOC-precedent figure
+    corrected against git: `265d676` = 304 insertions.
+- Step 2 note: the worst-case **fixture song** is built by the SDK harness
+  (their step 3); the stable-max validation for it rides with that wiring.
+  Both currently-existing ROMs are measured and deterministic (above).

@@ -252,6 +252,268 @@ static void dump_trace_row(GB_gameboy_t *_gb)
     }
     fputc('\n', trace_file);
 }
+
+/* Function-cycle profiler (--profile). Design: Tester/TAD.md D1-D12.
+   Brackets are SP-keyed (entry SP + the return address read from it), so
+   early returns, tail calls, recursion and IRQ preemption all close on
+   "PC == return address with the stack unwound past the entry frame" rather
+   than on any particular ret instruction. Reported unit is T-cycles
+   (GB_run's 8MHz ticks / 2 — valid at single speed; the SDK consumer is
+   DMG-only). */
+#define PROFILE_MAX 8
+#define PROFILE_FRAMES_MAX 16
+#define PROFILE_IRQ_MAX 8
+
+typedef struct {
+    char     label[WATCH_LABEL_MAX];
+    uint16_t addr;
+    int      bank;         /* -1 = any (hex-literal token) */
+    unsigned long long calls;
+    unsigned long long total_excl;
+    unsigned long long max_excl;
+    unsigned long long max_incl;
+} profile_sym_t;
+
+typedef struct {
+    unsigned sym_index;
+    uint16_t sp_entry;     /* SP at entry: points at the return address */
+    uint16_t return_addr;
+    uint16_t entry_bank;
+    unsigned entry_frame;
+    uint64_t t0;           /* profile_ticks at entry (8MHz ticks) */
+    uint64_t irq_sub;      /* ticks spent in IRQ handlers that preempted us */
+    unsigned irq_count;
+} profile_frame_t;
+
+typedef struct {
+    uint16_t sp_entry;
+    uint16_t return_addr;
+    uint64_t t0;
+} irq_window_t;
+
+static const char      *profile_arg;
+static const char      *profile_filename;
+static FILE            *profile_file;
+static profile_sym_t    profile_syms[PROFILE_MAX];
+static unsigned         n_profile_syms;
+static profile_frame_t  profile_stack[PROFILE_FRAMES_MAX];
+static unsigned         profile_depth;
+static irq_window_t     irq_windows[PROFILE_IRQ_MAX];
+static unsigned         irq_depth;
+static uint64_t         profile_ticks;
+static bool             profile_warned_missed, profile_warned_full, profile_warned_speed;
+
+static bool resolve_profile_token(const char *tok, profile_sym_t *out)
+{
+    size_t len = strlen(tok);
+    if (len == 0 || len >= WATCH_LABEL_MAX) return false;
+    memcpy(out->label, tok, len + 1);
+    out->calls = out->total_excl = out->max_excl = out->max_incl = 0;
+
+    if (len > 2 && (tok[0] == '0') && (tok[1] == 'x' || tok[1] == 'X')) {
+        char *end;
+        unsigned long v = strtoul(tok + 2, &end, 16);
+        if (*end != '\0' || v > 0xFFFF) return false;
+        out->addr = (uint16_t)v;
+        out->bank = -1;
+        return true;
+    }
+
+#ifndef GB_DISABLE_DEBUGGER
+    /* The reversed map keeps one entry per (name, bank) and its find function
+       returns the first hit, so scan every chain: D11 makes cross-bank
+       ambiguity a hard error rather than a silent first-match. */
+    const GB_symbol_t *found = NULL;
+    bool ambiguous = false;
+    for (unsigned b = 0; b < sizeof(gb.reversed_symbol_map.buckets) / sizeof(gb.reversed_symbol_map.buckets[0]); b++) {
+        for (const GB_symbol_t *sym = gb.reversed_symbol_map.buckets[b]; sym; sym = sym->next) {
+            if (strcmp(sym->name, tok) != 0) continue;
+            if (found && (found->bank != sym->bank || found->addr != sym->addr)) ambiguous = true;
+            if (!found) found = sym;
+        }
+    }
+    if (ambiguous) {
+        fprintf(stderr, "profile: symbol '%s' is ambiguous across banks; no bank:name syntax in v1 — make .sym names unique\n", tok);
+        return false;
+    }
+    if (found) {
+        out->addr = found->addr;
+        out->bank = found->bank;
+        return true;
+    }
+#endif
+    fprintf(stderr, "profile: unknown symbol '%s' (no --sym file, or symbol not in map)\n", tok);
+    return false;
+}
+
+static bool resolve_profiles(const char *arg)
+{
+    n_profile_syms = 0;
+    const char *s = arg;
+    while (*s) {
+        const char *comma = strchr(s, ',');
+        size_t len = comma ? (size_t)(comma - s) : strlen(s);
+        while (len && (s[len - 1] == ' ' || s[len - 1] == '\t')) len--;
+        while (len && (*s == ' ' || *s == '\t')) { s++; len--; }
+        if (len == 0) goto next;
+        if (len >= WATCH_LABEL_MAX) {
+            fprintf(stderr, "profile: token too long\n");
+            return false;
+        }
+        if (n_profile_syms >= PROFILE_MAX) {
+            fprintf(stderr, "profile: too many symbols (max %d)\n", PROFILE_MAX);
+            return false;
+        }
+        char tok[WATCH_LABEL_MAX];
+        memcpy(tok, s, len);
+        tok[len] = '\0';
+        if (!resolve_profile_token(tok, &profile_syms[n_profile_syms])) return false;
+        n_profile_syms++;
+    next:
+        if (!comma) break;
+        s = comma + 1;
+    }
+    return true;
+}
+
+static uint16_t profile_read16(GB_gameboy_t *_gb, uint16_t addr)
+{
+    return GB_safe_read_memory(_gb, addr) | (GB_safe_read_memory(_gb, (uint16_t)(addr + 1)) << 8);
+}
+
+static uint16_t profile_mapped_bank(GB_gameboy_t *_gb, uint16_t addr)
+{
+    if (addr < 0x4000) return _gb->mbc_rom0_bank;
+    if (addr < 0x8000) return _gb->mbc_rom_bank;
+    return 0; /* RAM code: not bank-qualified (DMG scope) */
+}
+
+static void profile_emit(profile_frame_t *f)
+{
+    profile_sym_t *s = &profile_syms[f->sym_index];
+    uint64_t incl_ticks = profile_ticks - f->t0;
+    uint64_t excl_ticks = incl_ticks - f->irq_sub;
+    /* D1/D9: T-cycles = 8MHz ticks / 2 at single speed */
+    unsigned long long incl = incl_ticks / 2;
+    unsigned long long excl = excl_ticks / 2;
+    if (gb.cgb_double_speed && !profile_warned_speed) {
+        profile_warned_speed = true;
+        fprintf(stderr, "profile: CPU is in double-speed mode; the ticks/2 T-cycle conversion is wrong there (DMG-only feature)\n");
+    }
+    fprintf(profile_file, "%s,%u,%llu,%u,%llu,%llu,%u\n",
+            s->label, f->entry_bank, s->calls, f->entry_frame, incl, excl, f->irq_count);
+    s->calls++;
+    s->total_excl += excl;
+    if (excl > s->max_excl) s->max_excl = excl;
+    if (incl > s->max_incl) s->max_incl = incl;
+}
+
+static void profile_step(GB_gameboy_t *_gb)
+{
+    uint16_t pc = _gb->pc;
+    uint16_t sp = _gb->registers[GB_REGISTER_SP];
+
+    /* Close completed IRQ windows (LIFO). A window's duration is charged to
+       the brackets it preempted (entered before the window opened) — unless
+       another window is still open around those brackets, in which case that
+       outer window's eventual duration already contains this one. */
+    while (irq_depth) {
+        irq_window_t *w = &irq_windows[irq_depth - 1];
+        if (pc != w->return_addr || sp < (uint16_t)(w->sp_entry + 2)) break;
+        uint64_t d = profile_ticks - w->t0;
+        uint64_t w_t0 = w->t0;
+        irq_depth--;
+        for (unsigned i = 0; i < profile_depth; i++) {
+            profile_frame_t *f = &profile_stack[i];
+            if (f->t0 <= w_t0 && (irq_depth == 0 || irq_windows[irq_depth - 1].t0 < f->t0)) {
+                f->irq_sub += d;
+                f->irq_count++;
+            }
+        }
+    }
+
+    /* Close the topmost completed bracket; anything stacked above it missed
+       its return observation and is discarded (warned once). */
+    for (unsigned i = profile_depth; i--;) {
+        profile_frame_t *f = &profile_stack[i];
+        if (pc == f->return_addr && sp >= (uint16_t)(f->sp_entry + 2)) {
+            if (i + 1 < profile_depth && !profile_warned_missed) {
+                profile_warned_missed = true;
+                fprintf(stderr, "profile: discarded %u nested bracket(s) whose return was never observed\n",
+                        profile_depth - i - 1);
+            }
+            profile_emit(f);
+            profile_depth = i;
+            break;
+        }
+    }
+
+    /* IRQ dispatch detection (D4): only relevant while something is bracketed
+       (or while inside a tracked handler, for correct nesting). */
+    if ((profile_depth || irq_depth) &&
+        (pc == 0x40 || pc == 0x48 || pc == 0x50 || pc == 0x58 || pc == 0x60)) {
+        if (irq_depth < PROFILE_IRQ_MAX) {
+            /* Suppress re-observation of the same dispatch (e.g. halt loops). */
+            if (!irq_depth || irq_windows[irq_depth - 1].sp_entry != sp ||
+                irq_windows[irq_depth - 1].return_addr != profile_read16(_gb, sp)) {
+                irq_window_t *w = &irq_windows[irq_depth++];
+                w->sp_entry = sp;
+                w->return_addr = profile_read16(_gb, sp);
+                w->t0 = profile_ticks;
+            }
+        }
+    }
+
+    /* Entry detection, bank-qualified (D3/D11). */
+    for (unsigned s = 0; s < n_profile_syms; s++) {
+        profile_sym_t *ps = &profile_syms[s];
+        if (pc != ps->addr) continue;
+        if (ps->bank >= 0 && pc < 0x8000 &&
+            profile_mapped_bank(_gb, pc) != (uint16_t)ps->bank) {
+            continue;
+        }
+        /* Same activation re-observed (halt/wait loop at the entry address, or
+           a tail self-jump): SP unchanged ⇒ not a new call. */
+        if (profile_depth && profile_stack[profile_depth - 1].sym_index == s &&
+            profile_stack[profile_depth - 1].sp_entry == sp) {
+            break;
+        }
+        if (profile_depth >= PROFILE_FRAMES_MAX) {
+            if (!profile_warned_full) {
+                profile_warned_full = true;
+                fprintf(stderr, "profile: bracket stack full (%d); dropping entries — is the routine returning?\n",
+                        PROFILE_FRAMES_MAX);
+            }
+            break;
+        }
+        profile_frame_t *f = &profile_stack[profile_depth++];
+        f->sym_index = s;
+        f->sp_entry = sp;
+        f->return_addr = profile_read16(_gb, sp);
+        f->entry_bank = ps->bank >= 0 ? (uint16_t)ps->bank : profile_mapped_bank(_gb, pc);
+        f->entry_frame = frames;
+        f->t0 = profile_ticks;
+        f->irq_sub = 0;
+        f->irq_count = 0;
+        break;
+    }
+}
+
+static void profile_finish(void)
+{
+    if (!profile_file) return;
+    for (unsigned s = 0; s < n_profile_syms; s++) {
+        profile_sym_t *ps = &profile_syms[s];
+        fprintf(profile_file,
+                "# summary symbol=%s calls=%llu total_t_cycles_excl=%llu max_t_cycles_excl=%llu max_t_cycles_incl=%llu\n",
+                ps->label, ps->calls, ps->total_excl, ps->max_excl, ps->max_incl);
+    }
+    if (profile_depth) {
+        fprintf(stderr, "profile: %u bracket(s) still open at end of run (not emitted)\n", profile_depth);
+    }
+    if (profile_file != stdout) fclose(profile_file);
+    profile_file = NULL;
+}
 /* end fork extensions ---------------------------------------------------- */
 static uint8_t bmp_header[] = {
     0x42, 0x4D, 0x48, 0x68, 0x01, 0x00, 0x00, 0x00,
@@ -520,6 +782,7 @@ int main(int argc, char **argv)
                         " [--jobs number of tests to run simultaneously]"
 #endif
                         " [--sym path to .sym] [--watch sym_or_addr[,...]] [--script path] [--trace-out path]"
+                        " [--profile sym_or_addr[,...]] [--profile-out path]"
                         " rom ...\n", argv[0]);
         exit(1);
     }
@@ -611,6 +874,18 @@ int main(int argc, char **argv)
             continue;
         }
 
+        if (strcmp(argv[i], "--profile") == 0 && i != argc - 1) {
+            profile_arg = argv[++i];
+            fprintf(stderr, "Profiling: %s\n", profile_arg);
+            continue;
+        }
+
+        if (strcmp(argv[i], "--profile-out") == 0 && i != argc - 1) {
+            profile_filename = argv[++i];
+            fprintf(stderr, "Profile output: %s\n", profile_filename);
+            continue;
+        }
+
 #ifndef _WIN32
         if (strcmp(argv[i], "--jobs") == 0 && i != argc - 1) {
             max_forks = atoi(argv[++i]);
@@ -645,7 +920,21 @@ int main(int argc, char **argv)
                 fprintf(stderr, "--trace-out is incompatible with --jobs > 1\n");
                 exit(1);
             }
+            /* D6 names --profile-out, but the default profile destination is
+               stdout, which forked runs interleave just the same. */
+            if (profile_arg && max_forks > 1) {
+                fprintf(stderr, "--profile is incompatible with --jobs > 1\n");
+                exit(1);
+            }
 #endif
+            if (profile_filename && !profile_arg) {
+                fprintf(stderr, "--profile-out requires --profile\n");
+                exit(1);
+            }
+            if (profile_arg && !sym_filename) {
+                /* Numeric tokens still work; only named symbols need --sym. */
+                fprintf(stderr, "--profile without --sym: only hex addresses resolvable\n");
+            }
             if (script_filename && push_start_a) {
                 fprintf(stderr, "--script overrides --start; --start ignored\n");
                 push_start_a = false;
@@ -791,6 +1080,25 @@ int main(int argc, char **argv)
             }
             fputc('\n', trace_file);
         }
+        n_profile_syms = 0;
+        if (profile_arg) {
+            /* Resolution needs the symbol map, so it runs after
+               GB_debugger_load_symbol_file — like --watch above. */
+            if (!resolve_profiles(profile_arg)) {
+                exit(1);
+            }
+            profile_file = profile_filename ? fopen(profile_filename, "w") : stdout;
+            if (!profile_file) {
+                fprintf(stderr, "Failed to open profile file '%s'\n", profile_filename);
+                exit(1);
+            }
+            profile_depth = irq_depth = 0;
+            profile_ticks = 0;
+            profile_warned_missed = profile_warned_full = profile_warned_speed = false;
+            fprintf(profile_file, "# rom: %s\n", filename);
+            fputs("# unit: T-cycles (GB_run 8MHz ticks / 2, single-speed)\n", profile_file);
+            fputs("symbol,bank,call_index,entry_frame,t_cycles_incl,t_cycles_excl,irq_count\n", profile_file);
+        }
 
         /* Run emulation */
         running = true;
@@ -798,7 +1106,12 @@ int main(int argc, char **argv)
         frames = 0;
         unsigned cycles = 0;
         while (running) {
-            cycles += GB_run(&gb);
+            unsigned step_ticks = GB_run(&gb);
+            cycles += step_ticks;
+            if (profile_file) { /* D8: inert unless --profile was passed */
+                profile_ticks += step_ticks;
+                profile_step(&gb);
+            }
             if (cycles >= 139810) { /* Approximately 1/60 a second. Intentionally not the actual length of a frame. */
                 dump_trace_row(&gb);
                 handle_buttons(&gb);
@@ -822,6 +1135,8 @@ int main(int argc, char **argv)
             fclose(trace_file);
             trace_file = NULL;
         }
+
+        profile_finish();
 
         GB_free(&gb);
 #ifndef _WIN32
