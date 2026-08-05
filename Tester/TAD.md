@@ -31,6 +31,10 @@ doesn't drive them. This is a wiring job, not new emulation work.
 | D6 | **`--profile-out` is incompatible with `--jobs > 1`; reject the combination.** | Direct precedent: `--trace-out` already rejects it (`Tester/main.c:644–647`) because forked runs interleave writes into one file. The existing check runs in the first-iteration harness-init block (post-parse), not at arg-parse; matching that placement is fine — the decision is the rejection, not its location. |
 | D7 | **Output is CSV, one row per completed invocation, plus a summary trailer.** | The request asks for machine-parseable per-invocation counts "and/or max/total/count". Per-call rows are strictly more informative; count/total/max derive from them, and a trailer saves the harness a reduction pass. |
 | D8 | **Profiling is inert unless `--profile` is passed — no behavior change to existing modes.** | The SDK's existing golden harness must stay green; acceptance criterion from the request. |
+| D9 | **Reported unit is T-cycles, converted tester-side** (closes OQ1, confirms D1). | Client sign-off (PR #10 comment, 2026-08-05): the SDK's `song_cost.py` reasoning is denominated in the 70,224 T-cyc/frame ceiling; conversion belongs in the tester. |
+| D10 | **The SDK golden asserts `t_cycles_excl`; both columns still emitted per D4** (closes OQ2). | Client sign-off: in-game `Music.tick` is IRQ-driven and preemptible; the budget wants the routine's own cost. `irq_count` explains any incl/excl divergence. |
+| D11 | **A symbol name ambiguous across banks is an error at resolve time; no `bank:name` syntax in v1** (closes OQ3). | Client sign-off: `Music.tick` is unique in their `.sym`; disambiguation syntax can be added later without breaking the contract. |
+| D12 | **CSV, one row per completed invocation + `# summary` trailer** (closes OQ4, confirms D7). | Client sign-off: matches the "max/total/count" ask; trivially parseable in the harness. |
 
 ## Proposed design surface
 
@@ -56,20 +60,6 @@ Column names carry the unit explicitly (D1). `irq_count` is the number of
 interrupts taken inside the bracket — it makes any inclusive/exclusive
 divergence self-explaining rather than mysterious.
 
-## Open Questions
-
-*For the kwigbo-gb-sdk engine lane. These set the format that lane parses, so
-they fold into the Decisions table before merge — canon allows Open Questions
-during the draft phase only.*
-
-- **OQ1** — Confirm T-cycles as the reported unit (D1) rather than raw 8MHz
-  ticks. If the SDK would rather divide on its side, D1 inverts.
-- **OQ2** — Which column does the pytest golden assert against:
-  `t_cycles_excl` (recommended, D4) or `t_cycles_incl`?
-- **OQ3** — CLI disambiguation syntax when a symbol name is not unique across
-  banks (D3): `bank:name`, or rely on `.sym` uniqueness and error on collision?
-- **OQ4** — CSV (D7) or JSON? CSV assumed; the request said "CSV/JSON".
-
 ## Steps
 
 | Step | Action | Validate | Rollback |
@@ -81,8 +71,9 @@ during the draft phase only.*
 
 ## Client review status
 
-- [ ] kwigbo-gb-sdk (GameBoy Dev) — owns the parsed format; OQ1–OQ4 are theirs
-  to close
+- [x] kwigbo-gb-sdk (GameBoy Dev) — owns the parsed format; closed OQ1–OQ4
+  "as recommended" with no overrides and posted STATUS:CLEAN on PR #10
+  (2026-08-05). Answers folded into D9–D12.
 
 ## Downstream commitments
 
@@ -120,3 +111,7 @@ during the draft phase only.*
   handed to the SDK lane via
   `kwigbo-gb-sdk/feedback/SAMEBOY_profile_TAD_open_questions.md`; their
   STATUS:CLEAN on PR #10 is the merge gate.
+- 2026-08-05 — SDK lane signed off: OQ1–OQ4 "as recommended", no overrides,
+  STATUS:CLEAN posted on PR #10. Folded as D9–D12; Open Questions section
+  retired. Client gate satisfied — implementation (steps 1, 4) proceeds as
+  follow-up commits on this PR per canon pattern (a).
