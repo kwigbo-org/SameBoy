@@ -162,3 +162,13 @@ divergence self-explaining rather than mysterious.
   single-symbol CSVs byte-identical; a 3-symbol nested run
   (`Music.tick,tickSquare1,tickNoise`) emits equal call counts (215 each)
   with correct nesting (64 T-cy inside 620 T-cy).
+- 2026-08-05 — Round 4: marker CLEAN 3/4; the codex minority finding was
+  again real and is fixed: the `--jobs` incompatibility checks lived inside
+  the per-ROM loop, i.e. in the *child* after the fork point, while the
+  parent ignores child exit statuses — so `--profile --jobs 2` printed the
+  error yet the process exited 0 (confirmed against the round-1 validation
+  transcript). Hard-error flag validation (`--jobs` incompatibilities,
+  `--profile-out` without `--profile`) now runs in a pre-fork argv scan and
+  exits 1 from the parent; this also fixes the same latent flaw in the
+  pre-existing `--trace-out` check. Verified: both rejections exit 1;
+  normal-run CSV byte-identical.

@@ -810,6 +810,37 @@ int main(int argc, char **argv)
     
     GB_random_set_enabled(false);
 
+    /* Hard-error flag validation must happen before the ROM loop: the loop
+       forks for --jobs > 1, so a check inside it only kills the child while
+       the parent's wait loop ignores exit statuses and still returns 0 —
+       automation would pass on an invalid configuration. */
+    {
+        bool has_profile = false, has_profile_out = false, has_trace_out = false;
+        unsigned scan_jobs = 1;
+        for (unsigned i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "--profile") == 0) has_profile = true;
+            else if (strcmp(argv[i], "--profile-out") == 0) has_profile_out = true;
+            else if (strcmp(argv[i], "--trace-out") == 0) has_trace_out = true;
+            else if (strcmp(argv[i], "--jobs") == 0 && i != argc - 1) scan_jobs = atoi(argv[i + 1]);
+        }
+        if (has_profile_out && !has_profile) {
+            fprintf(stderr, "--profile-out requires --profile\n");
+            exit(1);
+        }
+#ifndef _WIN32
+        if (scan_jobs > 1 && has_trace_out) {
+            fprintf(stderr, "--trace-out is incompatible with --jobs > 1\n");
+            exit(1);
+        }
+        /* D6 names --profile-out, but the default profile destination is
+           stdout, which forked runs interleave just the same. */
+        if (scan_jobs > 1 && has_profile) {
+            fprintf(stderr, "--profile is incompatible with --jobs > 1\n");
+            exit(1);
+        }
+#endif
+    }
+
     for (unsigned i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--dmg") == 0) {
             fprintf(stderr, "Using DMG mode\n");
@@ -926,22 +957,9 @@ int main(int argc, char **argv)
         static bool harness_init_done = false;
         if (!harness_init_done) {
             harness_init_done = true;
-#ifndef _WIN32
-            if (trace_filename && max_forks > 1) {
-                fprintf(stderr, "--trace-out is incompatible with --jobs > 1\n");
-                exit(1);
-            }
-            /* D6 names --profile-out, but the default profile destination is
-               stdout, which forked runs interleave just the same. */
-            if (profile_arg && max_forks > 1) {
-                fprintf(stderr, "--profile is incompatible with --jobs > 1\n");
-                exit(1);
-            }
-#endif
-            if (profile_filename && !profile_arg) {
-                fprintf(stderr, "--profile-out requires --profile\n");
-                exit(1);
-            }
+            /* Hard errors (--jobs incompatibilities, --profile-out without
+               --profile) are rejected by the pre-fork scan above; only
+               advisories and script loading belong here. */
             if (profile_arg && !sym_filename) {
                 /* Numeric tokens still work; only named symbols need --sym. */
                 fprintf(stderr, "--profile without --sym: only hex addresses resolvable\n");
