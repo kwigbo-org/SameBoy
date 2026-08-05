@@ -153,3 +153,12 @@ divergence self-explaining rather than mysterious.
   charged with its own runtime via equal timestamps (codex HIGH). CSV
   output for both validation ROMs is byte-identical before/after the fixes
   (`irq_count` was 0 throughout), so the recorded numbers stand.
+- 2026-08-05 — Round 3: marker CLEAN 3/4, but the dissenting codex finding
+  was a real minority catch, fixed per canon rather than ridden past: a
+  tail-call chain between two *profiled* symbols shares one
+  `sp_entry`/`return_addr`, and the close loop's `break` emitted only the
+  innermost frame, leaking the outer one until end-of-run. The loop now
+  closes every frame matching at the same observation. Verified:
+  single-symbol CSVs byte-identical; a 3-symbol nested run
+  (`Music.tick,tickSquare1,tickNoise`) emits equal call counts (215 each)
+  with correct nesting (64 T-cy inside 620 T-cy).

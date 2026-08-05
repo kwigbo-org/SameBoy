@@ -436,8 +436,11 @@ static void profile_step(GB_gameboy_t *_gb, unsigned step_ticks)
         }
     }
 
-    /* Close the topmost completed bracket; anything stacked above it missed
-       its return observation and is discarded (warned once). */
+    /* Close completed brackets; anything stacked above the topmost match
+       missed its return observation and is discarded (warned once). No break
+       after a match: a tail-call chain between profiled symbols leaves
+       multiple frames sharing the same sp_entry/return_addr, and they all
+       complete at this same observation. */
     for (unsigned i = profile_depth; i--;) {
         profile_frame_t *f = &profile_stack[i];
         if (pc == f->return_addr && sp >= (uint16_t)(f->sp_entry + 2)) {
@@ -448,7 +451,6 @@ static void profile_step(GB_gameboy_t *_gb, unsigned step_ticks)
             }
             profile_emit(f);
             profile_depth = i;
-            break;
         }
     }
 
