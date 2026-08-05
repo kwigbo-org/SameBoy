@@ -59,11 +59,12 @@ public headers): `GB_alloc` / `GB_init` / `GB_reset` / `GB_free` / `GB_dealloc`,
 
 - **GB Editor iOS lane:** thin Swift wrapper over the module (explicitly out of
   scope for this repo); pin the current SPM tag in `Package.resolved`.
-  **OPEN as of 2026-08-05:** that lane still pins `0.1.0-spm` (`f2af334`) in
-  both `GBEmulator/Package.swift` and its two `Package.resolved` files — the
-  pre-fix commit whose iOS build fails on `Cocoa/PopoverView.xib`. It needs
-  `0.1.1-spm` (`70066ea`). Verified source-compatible: the wrapper's 13-symbol
-  API surface compiles unchanged against v0.1.1-spm for both iOS destinations.
+  **Resolved 2026-08-05** (operator confirmed): the lane re-pinned from
+  `0.1.0-spm` (`f2af334`, the pre-fix commit whose iOS build fails on
+  `Cocoa/PopoverView.xib`) to `0.1.1-spm` (`70066ea`). The bump had been
+  verified source-compatible in advance — the wrapper's 13-symbol API surface
+  compiles unchanged against v0.1.1-spm for both iOS destinations. No open
+  commitments remain on the consumer side for v0.1.x.
 - **Mac lane / operator:** step 2 build-check (the Linux box has no Swift
   toolchain or Apple SDKs — per lane build-host split). **Done 2026-08-03**,
   see Progress log.
