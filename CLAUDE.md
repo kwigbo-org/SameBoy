@@ -72,10 +72,19 @@ Apple-side build invocations (the generated scheme is named for the *package*,
 not the product — `-scheme SameBoyCore` fails):
 
 ```sh
-swift build                                                                   # macOS host
-xcodebuild -scheme SameBoy -destination 'platform=iOS Simulator,name=iPhone 16 Pro' build
+swift build                                                        # macOS host
+xcodebuild -scheme SameBoy -destination 'id=<simulator-UDID>' build  # UDID via: xcrun simctl list devices available
 xcodebuild -scheme SameBoy -destination 'generic/platform=iOS' build
 ```
+
+Address the simulator by `id=`, not by name: name-based destinations
+(`platform=iOS Simulator,name=…`) can spuriously stop resolving —
+`xcodebuild` reports "Unable to find a device matching the provided
+destination specifier" while `simctl` still lists the device (observed
+2026-08-06, same UDID that had worked before). The failure exits non-zero
+and reads exactly like an iOS build regression, which on this lane is the
+costliest kind of false negative (the v0.1.0-spm incident's signature was
+"macOS passed, iOS broke").
 
 ## Keeping the two hosts in sync
 
