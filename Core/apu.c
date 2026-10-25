@@ -1716,7 +1716,7 @@ void GB_apu_write(GB_gameboy_t *gb, uint8_t reg, uint8_t value)
             break;
         case GB_IO_NR52: {
 
-            uint8_t old_pulse_lengths[] = {
+            uint16_t old_pulse_lengths[] = {
                 gb->apu.square_channels[0].pulse_length,
                 gb->apu.square_channels[1].pulse_length,
                 gb->apu.wave_channel.pulse_length,
@@ -1736,7 +1736,7 @@ void GB_apu_write(GB_gameboy_t *gb, uint8_t reg, uint8_t value)
                 gb->apu.apu_cycles_in_2mhz = true;
             }
 
-            if (!GB_is_cgb(gb) && (value & 0x80)) {
+            if (!GB_is_cgb(gb)) {
                 gb->apu.square_channels[0].pulse_length = old_pulse_lengths[0];
                 gb->apu.square_channels[1].pulse_length = old_pulse_lengths[1];
                 gb->apu.wave_channel.pulse_length = old_pulse_lengths[2];
